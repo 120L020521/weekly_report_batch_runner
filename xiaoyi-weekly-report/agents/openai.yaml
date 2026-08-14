@@ -1,0 +1,7 @@
+interface:
+  display_name: "XiaoYi Weekly Report Runner"
+  short_description: "独立执行小艺周报与日报批跑，串行处理人员任务并回收日志、worklog和报告产物"
+  default_prompt: "Use $xiaoyi-weekly-report to run the selected external weekly-report dataset and return the Runner handoff."
+
+policy:
+  allow_implicit_invocation: false

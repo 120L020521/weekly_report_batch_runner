@@ -1,0 +1,24 @@
+{
+  "metadata_root": "external:task",
+  "deliverables_root": "external:deliverables_final",
+  "scripts_root": "../scripts/runtime",
+  "output_root": "external:xiaoyi_logs",
+  "month": "2026-07",
+  "calendar_start": "2026-07-01",
+  "calendar_end": "2026-07-31",
+  "xiaoyi_timeout": 1800,
+  "helper_timeout": 300,
+  "poll_seconds": 3,
+  "task_interval": 3,
+  "person_interval": 5,
+  "clear_before_person": true,
+  "require_worklog": false,
+  "prompt_suffix": "生成的worklog和周报放到桌面上",
+  "remote_output_roots": {
+    "Download": "/storage/media/100/local/files/Docs/Download",
+    "Desktop": "/storage/media/100/local/files/Docs/Desktop",
+    "Documents": "/storage/media/100/local/files/Docs/Documents",
+    "Workspace": "/storage/Users/currentUser/.xiaoyi/workspace",
+    "WorkspaceLegacy": "/storage/User/currentUser/.xiaoyi/workspace"
+  }
+}
