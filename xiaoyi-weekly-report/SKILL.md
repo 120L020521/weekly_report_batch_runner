@@ -5,9 +5,11 @@ description: >-
   per-person deliverables_final data and numeric metadata.json tasks marked
   adapter: weekly-report. Use for Runner-only report generation that must push
   each person's files, calendar, and memos once; execute that person's selected
-  tasks serially; pull log-declared reports and worklogs; fetch evidence; and
-  clear the device before the next person. All executable code and default
-  configuration are bundled in this Skill; task and deliverable data remain external.
+  tasks serially; automatically continue the same XiaoYi dialog through
+  confirmation, choice, or retry stops; pull log-declared reports and worklogs;
+  fetch evidence; and clear the device before the next person. All executable
+  code and default configuration are bundled in this Skill; task and deliverable
+  data remain external.
 ---
 
 # Run XiaoYi Weekly Reports
@@ -53,25 +55,35 @@ Desktop, Documents, and Download, then push that person's data. For each person:
 1. Push that person's files, calendar, and memos exactly once.
 2. Run selected Tasks in numeric order without clearing or re-pushing between Tasks.
 3. Append the configured desktop-output suffix to every XiaoYi prompt.
-4. Pull the current JSONL log, parse only bytes after the Task baseline, and pull
+4. After every `stop_reason=stop`, read the latest main-Agent reply. Treat an
+   explicit confirmation/permission/choice gate, a future-only plan, or a
+   partial/failed result as incomplete. Refresh the history list only when a
+   continuation is required, save the latest `dialogPageId`, and resume the same
+   dialog with `pc_agent_task_start + historySessionId`. Send an affirmative reply
+   that preserves the original time range, content, and output format. Allow at
+   most three continuation pushes by default; never clear, re-push person data,
+   or force-stop XiaoYi between dialog rounds.
+5. Pull each round's current JSONL log, parse only bytes after that round's
+   baseline, merge its concrete artifact paths, and pull
    only concrete files under Desktop into `<output_root>/task<numeric_id>/outputs/`.
    Reject Workspace, Download, Documents, `工作快捷区`, `文件输出`, and arbitrary
    declared directories; never recursively pull a directory declared by the log.
-5. Before each Task, record metadata for worklog artifacts only: matching files
+6. Before each Task, record metadata for worklog artifacts only: matching files
    at the Desktop root and every concrete file inside a first-level Desktop folder
    whose name contains `worklog`, `work_log`, `work-log`, `工作日志`, or `工作记录`.
    After the Task, pull only files that are new or changed, preserving the matching
    folder beneath `outputs/Desktop/`. Use this targeted delta when the JSONL omits
    the Desktop worklog folder or file paths.
-6. After each Task's log and artifacts are safely local, force-stop XiaoYi exactly
+7. After the Task reaches a final dialog verdict and its log and artifacts are
+   safely local, force-stop XiaoYi exactly
    once. Start the next Task through `PCAgentTaskAbility`; do not clear or push
    again when it belongs to the same person.
-7. Fetch device calendar and memo evidence plus the local source-file mirror into
+8. Fetch device calendar and memo evidence plus the local source-file mirror into
    `<metadata_root>/<person>/data/` after the person's selected Tasks are terminal.
-8. Clear the person's device data before continuing to the next person. Run all
+9. Clear the person's device data before continuing to the next person. Run all
    fetch, clear, and subsequent push calls to `BatchToolExecuteAbility` with
    `--keep-app-running`; never force-stop between those lifecycle substeps.
-9. When the previous person's final clear succeeded, skip the next person's
+10. When the previous person's final clear succeeded, skip the next person's
    initial clear and push the next data directly. Retry the initial clear only
    when the previous cleanup failed.
 
@@ -83,6 +95,14 @@ declare a concrete Desktop report file, fail the Task instead of scanning an
 arbitrary directory and guessing. Require at least one pulled worklog file.
 Do not explicitly relaunch XiaoYi between lifecycle substeps. Starting the next
 Task through `PCAgentTaskAbility` is the relaunch point.
+
+Automatic continuation is enabled by `auto_continue: true`; keep it enabled for
+normal runs. `max_continue_rounds` defaults to `3`, giving four pushes total
+(initial plus three continuations), matching `xiaoyi-auto-continue`. If the reply
+still blocks or remains incomplete after the budget, or no `dialogPageId` can be
+resolved, fail that Task, collect available evidence, stop XiaoYi once, and then
+follow the selected batch failure policy. Do not interpret a courtesy question
+after a concrete completion statement as another confirmation gate.
 
 ## Execute
 
@@ -145,6 +165,7 @@ Store each Task's Runner evidence in one prefixed directory:
 ├── task<numeric_id>.jsonl
 ├── task<numeric_id>.meta.json
 ├── task<numeric_id>.prompt.txt
+├── task<numeric_id>.continue1.txt ... task<numeric_id>.continue3.txt (when used)
 ├── task<numeric_id>.content.txt
 ├── metadata.json
 ├── artifacts_manifest.json

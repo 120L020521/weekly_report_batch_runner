@@ -23,6 +23,7 @@ from .case_manager import (
     mark_case_failed,
     mark_case_interrupted,
 )
+from .dialog_history import get_latest_dialog_page_id
 from .hdc_client import (
     HdcCommandLogger,
     HdcError,
@@ -72,6 +73,8 @@ DEFAULTS: dict[str, Any] = {
     "person_interval": 5,
     "clear_before_person": True,
     "require_worklog": True,
+    "auto_continue": True,
+    "max_continue_rounds": 3,
     "prompt_suffix": "生成的worklog文件夹和周报文件放到桌面上，并在最终回复中分别给出worklog文件夹和周报文件的桌面绝对路径",
     "remote_output_roots": {
         "Desktop": "/storage/media/100/local/files/Docs/Desktop",
@@ -92,6 +95,40 @@ _VIRTUAL_OUTPUT_PATH_MAPPINGS: tuple[tuple[str, str], ...] = (
 _LOGGED_FILE_EXTENSIONS = "md|markdown|html?|docx?|pdf|xlsx?|csv|jsonl?|txt|log"
 _WORKLOG_PATH_HINTS = ("worklog", "work_log", "work-log", "工作日志", "工作记录")
 _EXCLUDED_OUTPUT_SEGMENTS = ("工作快捷区", "文件输出")
+_CONFIRMATION_PATTERNS = tuple(
+    re.compile(pattern, flags=re.IGNORECASE | re.DOTALL)
+    for pattern in (
+        r"请.{0,20}确认",
+        r"请.{0,12}(?:授权|允许)",
+        r"需要.{0,20}确认",
+        r"需要(?:你|您)?(?:授权|允许|选择)",
+        r"确认后.{0,30}(?:继续|生成|创建|保存|执行|读取|访问)",
+        r"是否.{0,30}(?:继续|生成|创建|保存|执行|读取|访问|使用|授权|允许)",
+        r"(?:要不要|是否要).{0,30}(?:继续|生成|创建|保存|执行|读取)",
+        r"(?:可以|能否).{0,30}(?:开始|继续|生成|创建|保存|执行|读取|访问).{0,8}[吗么？?]",
+        r"请选择(?:方案|格式|范围|方式)?",
+        r"(?:你|您).{0,10}(?:倾向|选择|希望采用|想选)",
+    )
+)
+_PARTIAL_OR_FAILURE_PATTERNS = tuple(
+    re.compile(pattern, flags=re.IGNORECASE | re.DOTALL)
+    for pattern in (
+        r"无法(?:完成|生成|保存|创建|读取)",
+        r"暂时(?:无法|不能)",
+        r"(?:生成|保存|创建|读取|执行).{0,12}失败",
+        r"未能(?:完成|生成|保存|创建|读取)",
+        r"需要手动处理",
+        r"请(?:重新)?提供.{0,20}(?:文件|数据|权限|信息)",
+        r"尚未完成|未完成的部分",
+    )
+)
+_FUTURE_ONLY_PATTERNS = tuple(
+    re.compile(pattern, flags=re.IGNORECASE | re.DOTALL)
+    for pattern in (
+        r"(?:准备|接下来|下一步|将会|将要).{0,20}(?:生成|创建|保存|整理|读取)",
+        r"待确认|等待确认",
+    )
+)
 
 
 @dataclass(frozen=True)
@@ -210,6 +247,72 @@ def _build_execution_prompt(task_text: str, suffix: str | None) -> str:
     if not suffix or task_text.endswith(suffix):
         return task_text
     return f"{task_text}\n{suffix}"
+
+
+def classify_stop_content(content: str | None) -> str:
+    """Classify whether the latest XiaoYi answer needs another dialog round."""
+    text = (content or "").strip()
+    if not text:
+        return "missing-content"
+    if any(pattern.search(text) for pattern in _CONFIRMATION_PATTERNS):
+        return "needs-confirmation"
+    if any(pattern.search(text) for pattern in _PARTIAL_OR_FAILURE_PATTERNS):
+        return "partial-or-failed"
+    if any(pattern.search(text) for pattern in _FUTURE_ONLY_PATTERNS):
+        return "needs-confirmation"
+    return "complete"
+
+
+def build_continue_query(verdict: str) -> str:
+    """Build a safe affirmative query that keeps the original report scope unchanged."""
+    if verdict == "partial-or-failed":
+        return (
+            "请继续重试并完成尚未完成的部分，严格保持原任务的时间范围、内容和"
+            "输出格式；全部完成后再汇报桌面上的worklog文件夹和周报文件绝对路径。"
+        )
+    return (
+        "确认，请继续完成原任务，严格保持原任务的时间范围、内容和输出格式；"
+        "全部完成后再汇报桌面上的worklog文件夹和周报文件绝对路径。"
+    )
+
+
+def _merge_logged_paths(
+    merged: dict[str, dict[str, Any]], detected: Iterable[dict[str, Any]]
+) -> None:
+    for item in detected:
+        remote_path = item.get("remote_path")
+        if isinstance(remote_path, str) and remote_path:
+            merged[remote_path] = item
+
+
+def _save_dialog_state(
+    task_dir: Path,
+    *,
+    dialog_page_id: str,
+    round_number: int,
+    verdict: str,
+    continue_queries: list[str],
+) -> None:
+    meta_path = task_dir / f"{task_dir.name}.meta.json"
+    meta: dict[str, Any] = {}
+    if meta_path.is_file():
+        try:
+            loaded = json.loads(meta_path.read_text(encoding="utf-8"))
+            if isinstance(loaded, dict):
+                meta = loaded
+        except (OSError, json.JSONDecodeError):
+            pass
+    meta.update(
+        {
+            "dialog_page_id": dialog_page_id or None,
+            "dialog_round": round_number,
+            "dialog_verdict": verdict,
+            "continue_queries": continue_queries,
+        }
+    )
+    meta_path.write_text(
+        json.dumps(meta, ensure_ascii=False, indent=2), encoding="utf-8"
+    )
 
 
 def _configured_remote_roots(remote_output_roots: dict[str, str]) -> list[tuple[str, str]]:
@@ -721,6 +824,7 @@ def run_weekly_task(task: WeeklyTask, config: dict[str, Any], *, target: str | N
         print(f"[{task.task_id}] worklog 基线获取失败，仅使用日志声明路径: {exc}", file=sys.stderr)
 
     before_logs = snapshot(list_remote_logs(target=target, user_id=None, date_id=today_id(), verbose=verbose))
+    active_before = before_logs
 
     done_log: RemoteLog | None = None
     local_log: Path | None = None
@@ -729,27 +833,116 @@ def run_weekly_task(task: WeeklyTask, config: dict[str, Any], *, target: str | N
     output_records: list[dict[str, Any]] = []
     worklog_records: list[dict[str, Any]] = []
     logged_paths: list[dict[str, Any]] = []
+    logged_paths_by_remote: dict[str, dict[str, Any]] = {}
     desktop_worklog_files: list[RemoteFile] = []
     worklog_delta_checked = False
     artifacts_collected = False
+    dialog_page_id = ""
+    continue_queries: list[str] = []
+    round_number = 0
+    dialog_verdict = "not-started"
+    max_continue_rounds = max(0, int(config.get("max_continue_rounds", 3)))
+    current_query = execution_prompt
+    history_session_id: str | None = None
     try:
-        start_prompt(execution_prompt, target=target, verbose=verbose)
-        done_log = wait_for_new_stop(
-            task_id=task.task_id,
-            before=before_logs,
-            target=target,
-            timeout_seconds=int(config["xiaoyi_timeout"]),
-            poll_seconds=float(config["poll_seconds"]),
-            verbose=verbose,
-        )
-        time.sleep(1.5)
-        local_log = pull_log(done_log, case_id=case_id, run_dir=str(output_root), target=target, verbose=verbose)
-        extract_stop_content(local_log, case_id, output_root)
-        logged_paths = extract_logged_output_paths(
-            local_log,
-            start_byte=before_logs.get(done_log.path, (0, 0))[0],
-            remote_output_roots=config["remote_output_roots"],
-        )
+        while True:
+            start_prompt(
+                current_query,
+                target=target,
+                verbose=verbose,
+                history_session_id=history_session_id,
+            )
+            done_log = wait_for_new_stop(
+                task_id=task.task_id,
+                before=active_before,
+                target=target,
+                timeout_seconds=int(config["xiaoyi_timeout"]),
+                poll_seconds=float(config["poll_seconds"]),
+                verbose=verbose,
+            )
+            time.sleep(1.5)
+            local_log = pull_log(
+                done_log,
+                case_id=case_id,
+                run_dir=str(output_root),
+                target=target,
+                verbose=verbose,
+            )
+            stop_content = extract_stop_content(local_log, case_id, output_root)
+            round_logged_paths = extract_logged_output_paths(
+                local_log,
+                start_byte=active_before.get(done_log.path, (0, 0))[0],
+                remote_output_roots=config["remote_output_roots"],
+            )
+            _merge_logged_paths(logged_paths_by_remote, round_logged_paths)
+            dialog_verdict = classify_stop_content(stop_content)
+            print(
+                f"[{task.task_id}] 对话轮次 {round_number}: {dialog_verdict}"
+            )
+            _save_dialog_state(
+                task_dir,
+                dialog_page_id=dialog_page_id,
+                round_number=round_number,
+                verdict=dialog_verdict,
+                continue_queries=continue_queries,
+            )
+
+            if dialog_verdict == "complete":
+                break
+            if dialog_verdict == "missing-content":
+                failure = "当前 stop 日志没有可判定的主 Agent 回复"
+                break
+            if not config.get("auto_continue", True):
+                failure = f"小艺仍需继续对话({dialog_verdict})，但 auto_continue 已关闭"
+                break
+            if len(continue_queries) >= max_continue_rounds:
+                failure = (
+                    f"小艺在 {max_continue_rounds} 次续接后仍未完成原任务"
+                    f"({dialog_verdict})"
+                )
+                break
+            if not dialog_page_id:
+                print(f"[{task.task_id}] 获取当前对话 dialogPageId...")
+                dialog_page_id = get_latest_dialog_page_id(
+                    target=target, verbose=verbose
+                )
+                if not dialog_page_id:
+                    failure = "小艺需要二次确认，但未获取到 dialogPageId"
+                    break
+
+            continue_query = build_continue_query(dialog_verdict)
+            continue_queries.append(continue_query)
+            next_round = len(continue_queries)
+            save_prompt_text(
+                continue_query,
+                case_id=case_id,
+                run_dir=str(output_root),
+                tag=f"continue{next_round}",
+            )
+            _save_dialog_state(
+                task_dir,
+                dialog_page_id=dialog_page_id,
+                round_number=round_number,
+                verdict=dialog_verdict,
+                continue_queries=continue_queries,
+            )
+            print(
+                f"[{task.task_id}] 发送续接 {next_round}/{max_continue_rounds}: "
+                f"{continue_query}"
+            )
+            active_before = snapshot(
+                list_remote_logs(
+                    target=target,
+                    user_id=None,
+                    date_id=today_id(),
+                    verbose=verbose,
+                )
+            )
+            current_query = continue_query
+            history_session_id = dialog_page_id
+            round_number = next_round
+
+        logged_paths = list(logged_paths_by_remote.values())
         try:
             desktop_worklog_files = changed_desktop_worklogs(
                 worklog_baseline,
@@ -786,7 +979,7 @@ def run_weekly_task(task: WeeklyTask, config: dict[str, Any], *, target: str | N
     if local_log is None and done_log is None:
         try:
             current_logs = list_remote_logs(target=target, user_id=None, date_id=today_id(), verbose=verbose)
-            candidates = changed_logs(before_logs, current_logs)
+            candidates = changed_logs(active_before, current_logs)
             done_log = candidates[0] if candidates else None
         except Exception:
             done_log = None
@@ -794,11 +987,13 @@ def run_weekly_task(task: WeeklyTask, config: dict[str, Any], *, target: str | N
         try:
             local_log = pull_log(done_log, case_id=case_id, run_dir=str(output_root), target=target, verbose=verbose)
             extract_stop_content(local_log, case_id, output_root)
-            logged_paths = extract_logged_output_paths(
+            fallback_logged_paths = extract_logged_output_paths(
                 local_log,
-                start_byte=before_logs.get(done_log.path, (0, 0))[0],
+                start_byte=active_before.get(done_log.path, (0, 0))[0],
                 remote_output_roots=config["remote_output_roots"],
             )
+            _merge_logged_paths(logged_paths_by_remote, fallback_logged_paths)
+            logged_paths = list(logged_paths_by_remote.values())
         except Exception as exc:
             failure = failure or f"日志拉取失败: {exc}"
 
@@ -843,6 +1038,10 @@ def run_weekly_task(task: WeeklyTask, config: dict[str, Any], *, target: str | N
         "present_formats": sorted(present_formats),
         "outputs_pulled": sum(1 for item in output_records if item.get("status") == "pulled"),
         "worklogs_pulled": sum(1 for item in worklog_records if item.get("status") == "pulled"),
+        "dialog_rounds": round_number + 1,
+        "pushes": 1 + len(continue_queries),
+        "dialog_verdict": dialog_verdict,
+        "continue_queries": continue_queries,
     }
     if interrupted:
         mark_case_interrupted(case_id, str(output_root))
