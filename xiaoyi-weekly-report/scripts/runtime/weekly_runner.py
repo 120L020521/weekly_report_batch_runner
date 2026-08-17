@@ -76,9 +76,10 @@ DEFAULTS: dict[str, Any] = {
     "history_initial_wait_seconds": 8,
     "history_max_retries": 6,
     "history_retry_delay_seconds": 5,
-    "prompt_suffix": "生成的worklog文件夹和周报文件放到桌面上，并在最终回复中分别给出worklog文件夹和周报文件的桌面绝对路径",
+    "prompt_suffix": "",
     "remote_output_roots": {
         "Desktop": "/storage/media/100/local/files/Docs/Desktop",
+        "XiaoYiWorkspace": "/storage/Users/currentUser/.xiaoyi/workspace",
     },
 }
 
@@ -96,6 +97,7 @@ _VIRTUAL_OUTPUT_PATH_MAPPINGS: tuple[tuple[str, str], ...] = (
 _LOGGED_FILE_EXTENSIONS = "md|markdown|html?|docx?|pdf|xlsx?|csv|jsonl?|txt|log"
 _WORKLOG_PATH_HINTS = ("worklog", "work_log", "work-log", "工作日志", "工作记录")
 _EXCLUDED_OUTPUT_SEGMENTS = ("工作快捷区", "文件输出")
+_XIAOYI_WORKSPACE_ROOT = "/storage/Users/currentUser/.xiaoyi/workspace"
 _CONFIRMATION_PATTERNS = tuple(
     re.compile(pattern, flags=re.IGNORECASE | re.DOTALL)
     for pattern in (
@@ -175,6 +177,11 @@ class RemoteFile:
 def _is_worklog_path(path: str) -> bool:
     normalized = path.casefold()
     return any(hint.casefold() in normalized for hint in _WORKLOG_PATH_HINTS)
+
+
+def _has_logged_file_extension(path: str) -> bool:
+    suffix = PurePosixPath(path).suffix.lower().lstrip(".")
+    return bool(suffix and re.fullmatch(_LOGGED_FILE_EXTENSIONS, suffix, flags=re.IGNORECASE))
 
 
 def _is_excluded_output_path(path: str) -> bool:
@@ -287,14 +294,8 @@ def classify_stop_content(content: str | None) -> str:
 def build_continue_query(verdict: str) -> str:
     """Build a safe affirmative query that keeps the original report scope unchanged."""
     if verdict == "partial-or-failed":
-        return (
-            "请继续重试并完成尚未完成的部分，严格保持原任务的时间范围、内容和"
-            "输出格式；全部完成后再汇报桌面上的worklog文件夹和周报文件绝对路径。"
-        )
-    return (
-        "确认，请继续完成原任务，严格保持原任务的时间范围、内容和输出格式；"
-        "全部完成后再汇报桌面上的worklog文件夹和周报文件绝对路径。"
-    )
+        return "请继续重试并完成尚未完成的部分，严格保持原任务的时间范围、内容和输出格式。"
+    return "确认，请继续完成原任务，严格保持原任务的时间范围、内容和输出格式。"
 
 
 def _merge_logged_paths(
@@ -370,6 +371,34 @@ def map_logged_path_to_remote(
     return None
 
 
+def map_relative_path_to_workspace(logged_path: str, session_id: str | None) -> dict[str, str] | None:
+    """Map a XiaoYi tool-relative output path to its session workspace."""
+    if not session_id:
+        return None
+    original = logged_path.strip().strip("`\"'")
+    if not original or original.startswith("file://"):
+        return None
+    normalized = original.replace("\\", "/").strip()
+    normalized = normalized.rstrip(".,;:!?，。；：！?]})、")
+    if not normalized or normalized.startswith("/") or re.match(r"^[A-Za-z]:", normalized):
+        return None
+    if "://" in normalized:
+        return None
+    parts = [part for part in PurePosixPath(normalized).parts if part not in {"", "."}]
+    if not parts or any(part == ".." for part in parts):
+        return None
+    relative = PurePosixPath(*parts).as_posix()
+    if not _has_logged_file_extension(relative) and not _is_worklog_path(relative):
+        return None
+    root_path = f"{_XIAOYI_WORKSPACE_ROOT}/{session_id}"
+    return {
+        "logged_path": logged_path,
+        "remote_path": f"{root_path}/{relative}",
+        "root_label": "XiaoYiWorkspace",
+        "root_path": root_path,
+    }
+
+
 def _walk_json_strings(value: Any) -> Iterable[str]:
     if isinstance(value, str):
         yield value
@@ -390,7 +419,8 @@ def _walk_json_strings(value: Any) -> Iterable[str]:
 
 
 _OUTPUT_PATH_KEYS = {
-    "filepath", "outputpath", "savepath", "savedpath", "destinationpath", "targetpath"
+    "filepath", "outputpath", "outputdir", "savedir", "savepath", "savedpath",
+    "destinationpath", "targetpath", "directory", "folder", "worklogdir",
 }
 _WRITE_TOOL_HINTS = ("write", "create", "save", "export", "document", "docx", "worklog")
 
@@ -441,6 +471,23 @@ def _paths_from_text(text: str, known_roots: Iterable[str]) -> Iterable[str]:
             yield match.group(0)
 
 
+def _relative_paths_from_text(text: str) -> Iterable[str]:
+    quoted = re.compile(
+        rf"[\"']([^\"']+\.(?:{_LOGGED_FILE_EXTENSIONS}))[\"']",
+        flags=re.IGNORECASE,
+    )
+    bare = re.compile(
+        rf"(?<![\w./-])([^\s\"'<>`|;&]+\.(?:{_LOGGED_FILE_EXTENSIONS}))"
+        r"(?=$|[\s\"'<>`\]),，。；;:])",
+        flags=re.IGNORECASE,
+    )
+    quoted_worklog_dir = re.compile(r"[\"']([^\"']*(?:worklog|work_log|work-log)[^\"']*)[\"']", flags=re.IGNORECASE)
+    bare_worklog_dir = re.compile(r"(?<![\w./-])([^\s\"'<>`|;&]*(?:worklog|work_log|work-log)[^\s\"'<>`|;&]*)", flags=re.IGNORECASE)
+    for pattern in (quoted, bare, quoted_worklog_dir, bare_worklog_dir):
+        for match in pattern.finditer(text):
+            yield match.group(1)
+
+
 def extract_logged_output_paths(
     local_log: Path,
     *,
@@ -459,8 +506,10 @@ def extract_logged_output_paths(
         except json.JSONDecodeError:
             continue
         event_name = str(event.get("event", "")).lower() if isinstance(event, dict) else ""
+        session_id = str(event.get("session_id", "")).strip() if isinstance(event, dict) else ""
         payload = event.get("payload", {}) if isinstance(event, dict) else {}
         values: Iterable[str] = ()
+        allow_relative = False
         if event_name == "model_output":
             values = _walk_json_strings(payload.get("assistant", payload))
         elif event_name == "tool_call":
@@ -468,19 +517,27 @@ def extract_logged_output_paths(
             args = payload.get("args", {})
             if any(hint in tool_name for hint in _WRITE_TOOL_HINTS):
                 values = _walk_json_strings(args)
+                allow_relative = True
             elif tool_name in {"bash", "shell", "exec"}:
                 command = str(args.get("command", "")) if isinstance(args, dict) else ""
                 values = _bash_output_fragments(command)
+                allow_relative = True
         elif event_name == "tool_result":
             tool_name = str(payload.get("tool_name", "")).lower()
             values = _walk_output_path_values(
                 payload, allow_plain_path=any(hint in tool_name for hint in _WRITE_TOOL_HINTS)
             )
+            allow_relative = True
         for value in values:
             for candidate in _paths_from_text(value, known_roots):
                 mapped = map_logged_path_to_remote(candidate, remote_output_roots)
                 if mapped is not None:
                     detected.setdefault(mapped["remote_path"], mapped)
+            if allow_relative:
+                for candidate in _relative_paths_from_text(value):
+                    mapped = map_relative_path_to_workspace(candidate, session_id)
+                    if mapped is not None:
+                        detected.setdefault(mapped["remote_path"], mapped)
     return list(detected.values())
 
 
@@ -707,18 +764,22 @@ def _write_artifact_manifest(task_dir: Path, *, task_id: str,
 def resolve_logged_remote_files(
     logged_paths: list[dict[str, Any]], *, target: str | None, verbose: bool
 ) -> list[RemoteFile]:
-    """Resolve only concrete Desktop files; never recurse into declared directories."""
+    """Resolve concrete output files; recurse only into logged worklog directories."""
     files: dict[str, RemoteFile] = {}
     for detected in logged_paths:
         remote_path = detected["remote_path"].rstrip("/")
-        if detected.get("root_label") != "Desktop":
-            detected["status"] = "ignored_non_desktop"
-            continue
         if _is_excluded_output_path(remote_path):
             detected["status"] = "ignored_internal_workspace"
             continue
         quoted = shell_quote(remote_path)
-        command = f"if [ -f {quoted} ]; then stat -c '%Y|%s|%n' {quoted}; fi; echo __END__"
+        if _is_worklog_path(remote_path):
+            command = (
+                f"if [ -f {quoted} ]; then stat -c '%Y|%s|%n' {quoted}; "
+                f"elif [ -d {quoted} ]; then find {quoted} -type f -exec stat -c '%Y|%s|%n' {{}} \\;; "
+                "fi; echo __END__"
+            )
+        else:
+            command = f"if [ -f {quoted} ]; then stat -c '%Y|%s|%n' {quoted}; fi; echo __END__"
         try:
             output = remote_shell(command, target=target, timeout=90, verbose=verbose)
         except HdcError as exc:

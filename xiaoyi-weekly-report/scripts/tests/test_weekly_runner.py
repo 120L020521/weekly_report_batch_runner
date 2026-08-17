@@ -14,6 +14,81 @@ from runtime import weekly_runner as runner
 
 
 class WeeklyRunnerArtifactTests(unittest.TestCase):
+    def test_default_prompt_uses_original_task_text(self):
+        task_text = "生成七月份第一周的工作周报"
+        self.assertEqual(task_text, runner._build_execution_prompt(task_text, ""))
+        self.assertEqual(task_text, runner._build_execution_prompt(task_text, None))
+
+    def test_log_relative_outputs_map_to_xiaoyi_workspace(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            log_path = root / "task21.jsonl"
+            events = [
+                {
+                    "event": "tool_call",
+                    "session_id": "session-21",
+                    "payload": {
+                        "tool_name": "write",
+                        "args": {"path": "weekly_report.docx"},
+                    },
+                },
+                {
+                    "event": "tool_result",
+                    "session_id": "session-21",
+                    "payload": {
+                        "tool_name": "write",
+                        "outputDir": "task21-worklog",
+                    },
+                },
+            ]
+            log_path.write_text(
+                "\n".join(json.dumps(item) for item in events) + "\n",
+                encoding="utf-8",
+            )
+
+            detected = runner.extract_logged_output_paths(
+                log_path,
+                start_byte=0,
+                remote_output_roots={
+                    "Desktop": "/desktop",
+                    "XiaoYiWorkspace": "/storage/Users/currentUser/.xiaoyi/workspace",
+                },
+            )
+
+            self.assertEqual(
+                {
+                    "/storage/Users/currentUser/.xiaoyi/workspace/session-21/weekly_report.docx",
+                    "/storage/Users/currentUser/.xiaoyi/workspace/session-21/task21-worklog",
+                },
+                {item["remote_path"] for item in detected},
+            )
+            self.assertEqual({"XiaoYiWorkspace"}, {item["root_label"] for item in detected})
+
+    def test_resolve_logged_worklog_directory_lists_files(self):
+        logged_paths = [
+            {
+                "logged_path": "task21-worklog",
+                "remote_path": "/storage/Users/currentUser/.xiaoyi/workspace/session-21/task21-worklog",
+                "root_label": "XiaoYiWorkspace",
+                "root_path": "/storage/Users/currentUser/.xiaoyi/workspace/session-21",
+            }
+        ]
+        response = (
+            "10|100|/storage/Users/currentUser/.xiaoyi/workspace/session-21/"
+            "task21-worklog/events.jsonl\n__END__"
+        )
+        with patch.object(runner, "remote_shell", return_value=response) as remote:
+            files = runner.resolve_logged_remote_files(
+                logged_paths, target=None, verbose=False
+            )
+
+        self.assertEqual(1, len(files))
+        self.assertEqual(
+            "/storage/Users/currentUser/.xiaoyi/workspace/session-21/task21-worklog/events.jsonl",
+            files[0].path,
+        )
+        self.assertIn("elif [ -d", remote.call_args.args[0])
+
     def test_desktop_worklog_scan_supports_common_names(self):
         response = "\n".join(
             [
@@ -271,6 +346,7 @@ class WeeklyRunnerArtifactTests(unittest.TestCase):
             self.assertEqual(
                 "dialog-21", start.call_args_list[1].kwargs["history_session_id"]
             )
+            self.assertNotIn("桌面", start.call_args_list[1].args[0])
             get_dialog.assert_called_once_with(
                 target=None,
                 wait_seconds=11.0,

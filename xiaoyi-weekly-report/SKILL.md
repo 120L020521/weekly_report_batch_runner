@@ -55,7 +55,9 @@ Desktop, Documents, and Download, then push that person's data. For each person:
 
 1. Push that person's files, calendar, and memos exactly once.
 2. Run selected Tasks in numeric order without clearing or re-pushing between Tasks.
-3. Append the configured desktop-output suffix to every XiaoYi prompt.
+3. Send `metadata.task` as the XiaoYi prompt by default. Do not append a desktop
+   output instruction during normal runs. Use `prompt_suffix` only as an explicit
+   compatibility override when the user asks for it.
 4. After every `stop_reason=stop`, read the latest main-Agent reply. Treat an
    explicit confirmation/permission/choice gate, a future-only plan, or a
    partial/failed result as incomplete. Refresh the history list only when a
@@ -69,10 +71,12 @@ Desktop, Documents, and Download, then push that person's data. For each person:
    most three continuation pushes by default; never clear, re-push person data,
    or force-stop XiaoYi between dialog rounds.
 5. Pull each round's current JSONL log, parse only bytes after that round's
-   baseline, merge its concrete artifact paths, and pull
-   only concrete files under Desktop into `<output_root>/task<numeric_id>/outputs/`.
-   Reject Workspace, Download, Documents, `工作快捷区`, `文件输出`, and arbitrary
-   declared directories; never recursively pull a directory declared by the log.
+   baseline, merge its concrete artifact paths, and pull only concrete files from
+   declared output roots into `<output_root>/task<numeric_id>/outputs/`. Support
+   the XiaoYi session workspace (`/storage/Users/currentUser/.xiaoyi/workspace/<session_id>`)
+   when write/bash logs declare relative report or worklog paths. Reject
+   `工作快捷区`, `文件输出`, and arbitrary declared directories; recurse only into
+   a declared worklog-like directory.
 6. Before each Task, record metadata for worklog artifacts only: matching files
    at the Desktop root and every concrete file inside a first-level Desktop folder
    whose name contains `worklog`, `work_log`, `work-log`, `工作日志`, or `工作记录`.
@@ -96,8 +100,9 @@ Never parallelize people or Tasks. Require a JSONL baseline. Do not take a full
 Desktop, Documents, or Download snapshot. The worklog fallback may query only
 worklog-like files at the Desktop root and first-level worklog-like Desktop folders,
 then compare their contained files by size/mtime. If the current log does not
-declare a concrete Desktop report file, fail the Task instead of scanning an
-arbitrary directory and guessing. Require at least one pulled worklog file.
+declare a concrete report file under a configured output root or XiaoYi session
+workspace, fail the Task instead of scanning an arbitrary directory and guessing.
+Require at least one pulled worklog file.
 Do not explicitly relaunch XiaoYi between lifecycle substeps. Starting the next
 Task through `PCAgentTaskAbility` is the relaunch point.
 
@@ -150,7 +155,7 @@ Use separate data paths only when the directories do not share one root:
 ```
 
 Use `--config <json>` only to override runtime settings such as month, calendar
-range, timeouts, intervals, prompt suffix, or remote output roots. The launcher
+range, timeouts, intervals, optional prompt suffix, or remote output roots. The launcher
 always replaces `scripts_root` with its bundled runtime and CLI data paths take
 precedence over config paths.
 
