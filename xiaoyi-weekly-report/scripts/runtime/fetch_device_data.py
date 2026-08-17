@@ -403,8 +403,6 @@ def copy_files_from_dataset(person: str, output_dir: Path,
       赵凯   → 达人合作/2026-07/{备忘,排期计划,文件输出,邮件}
     用 rglob 镜像可自动适配这些差异。
     """
-    # Documents 下只复制"文件输出",跳过排期计划、邮件、备忘/memo
-    DOCS_EXCLUDE_DIRS = {"排期计划", "邮件", "备忘", "memo", "inbox"}
 
     print("\n========== 从数据集复制文件 ==========")
     dirs = subdirs if subdirs is not None else TOP_DIRS
@@ -427,11 +425,6 @@ def copy_files_from_dataset(person: str, output_dir: Path,
             if item.is_dir():
                 continue
             rel = item.relative_to(src_dir)
-            # Documents 下跳过排期计划/邮件/备忘/memo 目录中的文件
-            if sub == "Documents":
-                parts = set(rel.parts)
-                if parts & DOCS_EXCLUDE_DIRS:
-                    continue
             dst_file = dst_dir / rel
             dst_file.parent.mkdir(parents=True, exist_ok=True)
             if dry_run:

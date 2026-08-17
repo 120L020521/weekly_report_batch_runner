@@ -87,8 +87,11 @@ Desktop, Documents, and Download, then push that person's data. For each person:
    safely local, force-stop XiaoYi exactly
    once. Start the next Task through `PCAgentTaskAbility`; do not clear or push
    again when it belongs to the same person.
-8. Fetch device calendar and memo evidence plus the local source-file mirror into
-   `<metadata_root>/<person>/data/` after the person's selected Tasks are terminal.
+8. Fetch device calendar and memo evidence plus the complete local source-file
+   mirror into `<metadata_root>/<person>/data/` after the person's selected Tasks
+   are terminal. Do not filter source directories such as mail, inbox, memos,
+   calendar/schedule exports, or XiaoYi Meeting/Notes evidence; Judge needs the
+   same available evidence surface as XiaoYi.
 9. Clear the person's device data before continuing to the next person. Run all
    fetch, clear, and subsequent push calls to `BatchToolExecuteAbility` with
    `--keep-app-running`; never force-stop between those lifecycle substeps.
