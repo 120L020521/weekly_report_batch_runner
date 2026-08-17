@@ -53,24 +53,34 @@ Desktop, Documents, and Download, then push that person's data. For each person:
 1. Push that person's files, calendar, and memos exactly once.
 2. Run selected Tasks in numeric order without clearing or re-pushing between Tasks.
 3. Append the configured desktop-output suffix to every XiaoYi prompt.
-4. Pull the current JSONL log, parse only bytes after the Task baseline, map
-   log-declared output paths, and pull only declared files or directories into
-   `<output_root>/task<numeric_id>/outputs/`.
-5. After each Task's log and artifacts are safely local, force-stop XiaoYi exactly
+4. Pull the current JSONL log, parse only bytes after the Task baseline, and pull
+   only concrete files under Desktop into `<output_root>/task<numeric_id>/outputs/`.
+   Reject Workspace, Download, Documents, `工作快捷区`, `文件输出`, and arbitrary
+   declared directories; never recursively pull a directory declared by the log.
+5. Before each Task, record metadata for worklog artifacts only: matching files
+   at the Desktop root and every concrete file inside a first-level Desktop folder
+   whose name contains `worklog`, `work_log`, `work-log`, `工作日志`, or `工作记录`.
+   After the Task, pull only files that are new or changed, preserving the matching
+   folder beneath `outputs/Desktop/`. Use this targeted delta when the JSONL omits
+   the Desktop worklog folder or file paths.
+6. After each Task's log and artifacts are safely local, force-stop XiaoYi exactly
    once. Start the next Task through `PCAgentTaskAbility`; do not clear or push
    again when it belongs to the same person.
-6. Fetch device calendar and memo evidence plus the local source-file mirror into
+7. Fetch device calendar and memo evidence plus the local source-file mirror into
    `<metadata_root>/<person>/data/` after the person's selected Tasks are terminal.
-7. Clear the person's device data before continuing to the next person. Run all
+8. Clear the person's device data before continuing to the next person. Run all
    fetch, clear, and subsequent push calls to `BatchToolExecuteAbility` with
    `--keep-app-running`; never force-stop between those lifecycle substeps.
-8. When the previous person's final clear succeeded, skip the next person's
+9. When the previous person's final clear succeeded, skip the next person's
    initial clear and push the next data directly. Retry the initial clear only
    when the previous cleanup failed.
 
-Never parallelize people or Tasks. Require a JSONL baseline. Do not use Desktop,
-Documents, or Download directory snapshots. If the current log does not declare
-a usable report path, fail the Task instead of scanning a directory and guessing.
+Never parallelize people or Tasks. Require a JSONL baseline. Do not take a full
+Desktop, Documents, or Download snapshot. The worklog fallback may query only
+worklog-like files at the Desktop root and first-level worklog-like Desktop folders,
+then compare their contained files by size/mtime. If the current log does not
+declare a concrete Desktop report file, fail the Task instead of scanning an
+arbitrary directory and guessing. Require at least one pulled worklog file.
 Do not explicitly relaunch XiaoYi between lifecycle substeps. Starting the next
 Task through `PCAgentTaskAbility` is the relaunch point.
 
@@ -142,10 +152,9 @@ Store each Task's Runner evidence in one prefixed directory:
 └── outputs/
 ```
 
-Do not create `.run`, `_runs`, or `run_<date>` directories. Store batch-level
-evidence directly under `<output_root>` as `weekly_runner_batch.json`,
-`hdc_commands_<YYYYMMDD>.log`, `<person>.<YYYYMMDD>.lifecycle.log`, and
-`<person>.<YYYYMMDD>.person_result.json`.
+Do not create `.run`, `_runs`, `run_<date>`, lifecycle, or person-result files.
+Store only `weekly_runner_batch.json` and, when `--log-hdc` is selected,
+`hdc_commands_<YYYYMMDD>.log` as batch-level evidence under `<output_root>`.
 
 Verify that `adapter` is `weekly-report`, `runnerFinished` is true, and every
 selected Task appears exactly once. Return the handoff path and one row per Task

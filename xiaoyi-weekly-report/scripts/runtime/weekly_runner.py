@@ -71,14 +71,10 @@ DEFAULTS: dict[str, Any] = {
     "task_interval": 3,
     "person_interval": 5,
     "clear_before_person": True,
-    "require_worklog": False,
-    "prompt_suffix": "生成的worklog和周报放到桌面上",
+    "require_worklog": True,
+    "prompt_suffix": "生成的worklog文件夹和周报文件放到桌面上，并在最终回复中分别给出worklog文件夹和周报文件的桌面绝对路径",
     "remote_output_roots": {
-        "Download": "/storage/media/100/local/files/Docs/Download",
         "Desktop": "/storage/media/100/local/files/Docs/Desktop",
-        "Documents": "/storage/media/100/local/files/Docs/Documents",
-        "Workspace": "/storage/Users/currentUser/.xiaoyi/workspace",
-        "WorkspaceLegacy": "/storage/User/currentUser/.xiaoyi/workspace",
     },
 }
 
@@ -94,6 +90,8 @@ _VIRTUAL_OUTPUT_PATH_MAPPINGS: tuple[tuple[str, str], ...] = (
     ("/data/service/el2/100/hmdfs/account/files/Docs/Documents", "/storage/media/100/local/files/Docs/Documents"),
 )
 _LOGGED_FILE_EXTENSIONS = "md|markdown|html?|docx?|pdf|xlsx?|csv|jsonl?|txt|log"
+_WORKLOG_PATH_HINTS = ("worklog", "work_log", "work-log", "工作日志", "工作记录")
+_EXCLUDED_OUTPUT_SEGMENTS = ("工作快捷区", "文件输出")
 
 
 @dataclass(frozen=True)
@@ -118,6 +116,92 @@ class RemoteFile:
     mtime: int
     root_label: str
     root_path: str
+
+
+def _is_worklog_path(path: str) -> bool:
+    normalized = path.casefold()
+    return any(hint.casefold() in normalized for hint in _WORKLOG_PATH_HINTS)
+
+
+def _is_excluded_output_path(path: str) -> bool:
+    return any(segment in path for segment in _EXCLUDED_OUTPUT_SEGMENTS)
+
+
+def list_remote_desktop_worklogs(
+    remote_output_roots: dict[str, str], *, target: str | None, verbose: bool
+) -> list[RemoteFile]:
+    """List Desktop worklog files and files inside first-level worklog folders."""
+    desktop_root = str(remote_output_roots.get("Desktop", "")).rstrip("/")
+    if not desktop_root:
+        return []
+    quoted = shell_quote(desktop_root)
+    name_filter = (
+        "\\( -iname '*worklog*' -o -iname '*work_log*' -o "
+        "-iname '*work-log*' -o -name '*工作日志*' -o -name '*工作记录*' \\)"
+    )
+    command = (
+        f"find {quoted} -maxdepth 1 -type f {name_filter} "
+        "-exec stat -c '%Y|%s|%n' {} \\;; "
+        f"find {quoted} -mindepth 1 -maxdepth 1 -type d {name_filter} -print | "
+        "while IFS= read -r worklog_dir; do "
+        "[ -n \"$worklog_dir\" ] && find \"$worklog_dir\" -type f "
+        "-exec stat -c '%Y|%s|%n' {} \\;; "
+        "done; echo __END__"
+    )
+    output = remote_shell(command, target=target, timeout=90, verbose=verbose)
+    payload = output.split("__END__", 1)[0]
+    files: list[RemoteFile] = []
+    for line in payload.splitlines():
+        parts = line.strip().split("|", 2)
+        if len(parts) != 3:
+            continue
+        mtime_text, size_text, path = parts
+        if _is_excluded_output_path(path) or not _is_worklog_path(path):
+            continue
+        try:
+            files.append(
+                RemoteFile(
+                    path=path,
+                    size=int(size_text),
+                    mtime=int(mtime_text),
+                    root_label="Desktop",
+                    root_path=desktop_root,
+                )
+            )
+        except ValueError:
+            continue
+    return sorted(files, key=lambda item: item.path)
+
+
+def _remote_file_snapshot(files: Iterable[RemoteFile]) -> dict[str, tuple[int, int]]:
+    return {item.path: (item.size, item.mtime) for item in files}
+
+
+def changed_remote_files(
+    before: dict[str, tuple[int, int]], current: Iterable[RemoteFile]
+) -> list[RemoteFile]:
+    changed = [
+        item for item in current
+        if item.path not in before
+        or item.size != before[item.path][0]
+        or item.mtime != before[item.path][1]
+    ]
+    return sorted(changed, key=lambda item: (item.mtime, item.size, item.path), reverse=True)
+
+
+def changed_desktop_worklogs(
+    before: dict[str, tuple[int, int]] | None,
+    remote_output_roots: dict[str, str],
+    *,
+    target: str | None,
+    verbose: bool,
+) -> list[RemoteFile]:
+    if before is None:
+        return []
+    current = list_remote_desktop_worklogs(
+        remote_output_roots, target=target, verbose=verbose
+    )
+    return changed_remote_files(before, current)
 
 
 def _build_execution_prompt(task_text: str, suffix: str | None) -> str:
@@ -357,7 +441,7 @@ def _helper_command(script: Path, *args: str) -> list[str]:
 
 
 def _call_clear(config: dict[str, Any], *, target: str | None, dry_run: bool,
-                lifecycle_log: Path) -> None:
+                lifecycle_log: Path | None) -> None:
     cmd = _helper_command(
         config["scripts_root"] / "clear_person_data.py",
         "--cal-start", str(config["calendar_start"]),
@@ -372,7 +456,7 @@ def _call_clear(config: dict[str, Any], *, target: str | None, dry_run: bool,
 
 
 def _call_push(person: str, config: dict[str, Any], *, target: str | None,
-               dry_run: bool, lifecycle_log: Path) -> None:
+               dry_run: bool, lifecycle_log: Path | None) -> None:
     person_dir = config["deliverables_root"] / person
     cmd = _helper_command(
         config["scripts_root"] / "push_person_data.py",
@@ -388,7 +472,7 @@ def _call_push(person: str, config: dict[str, Any], *, target: str | None,
 
 
 def _call_fetch(person: str, config: dict[str, Any], *, target: str | None,
-                dry_run: bool, lifecycle_log: Path) -> None:
+                dry_run: bool, lifecycle_log: Path | None) -> None:
     cmd = _helper_command(
         config["scripts_root"] / "fetch_device_data.py",
         "--person", person,
@@ -514,16 +598,18 @@ def _write_artifact_manifest(task_dir: Path, *, task_id: str,
 def resolve_logged_remote_files(
     logged_paths: list[dict[str, Any]], *, target: str | None, verbose: bool
 ) -> list[RemoteFile]:
-    """Resolve only log-declared files/directories; never scan configured output roots."""
+    """Resolve only concrete Desktop files; never recurse into declared directories."""
     files: dict[str, RemoteFile] = {}
     for detected in logged_paths:
         remote_path = detected["remote_path"].rstrip("/")
+        if detected.get("root_label") != "Desktop":
+            detected["status"] = "ignored_non_desktop"
+            continue
+        if _is_excluded_output_path(remote_path):
+            detected["status"] = "ignored_internal_workspace"
+            continue
         quoted = shell_quote(remote_path)
-        command = (
-            f"if [ -f {quoted} ]; then stat -c '%Y|%s|%n' {quoted}; "
-            f"elif [ -d {quoted} ]; then find {quoted} -type f "
-            "-exec stat -c '%Y|%s|%n' {} \\;; fi; echo __END__"
-        )
+        command = f"if [ -f {quoted} ]; then stat -c '%Y|%s|%n' {quoted}; fi; echo __END__"
         try:
             output = remote_shell(command, target=target, timeout=90, verbose=verbose)
         except HdcError as exc:
@@ -561,23 +647,35 @@ def _collect_task_artifacts(
     target: str | None,
     verbose: bool,
     logged_paths: list[dict[str, Any]],
+    extra_worklog_files: Iterable[RemoteFile] = (),
 ) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
-    """在 force-stop 前直接拉取本轮日志明确声明的产物。"""
+    """Pull concrete Desktop files plus changed Desktop worklogs for this Task."""
     resolved_files = resolve_logged_remote_files(logged_paths, target=target, verbose=verbose)
-    worklog_files = [
+    logged_worklog_files = [
         item for item in resolved_files
-        if "worklog" in item.path.lower() or "work_log" in item.path.lower()
+        if _is_worklog_path(item.path)
     ]
-    worklog_paths = {item.path for item in worklog_files}
+    worklog_paths = {item.path for item in logged_worklog_files}
+    fallback_worklog_files = [
+        item for item in extra_worklog_files
+        if item.path not in worklog_paths and not _is_excluded_output_path(item.path)
+    ]
+    worklog_paths.update(item.path for item in fallback_worklog_files)
     report_files = [item for item in resolved_files if item.path not in worklog_paths]
     output_records = pull_remote_files(
         report_files, local_root=task_dir / "outputs", target=target, verbose=verbose
     )
-    worklog_records = pull_remote_files(
-        worklog_files, local_root=task_dir / "outputs", target=target, verbose=verbose
+    logged_worklog_records = pull_remote_files(
+        logged_worklog_files, local_root=task_dir / "outputs", target=target, verbose=verbose
     )
-    for record in output_records + worklog_records:
+    fallback_worklog_records = pull_remote_files(
+        fallback_worklog_files, local_root=task_dir / "outputs", target=target, verbose=verbose
+    )
+    for record in output_records + logged_worklog_records:
         record["selection_source"] = "log"
+    for record in fallback_worklog_records:
+        record["selection_source"] = "desktop-worklog-delta"
+    worklog_records = logged_worklog_records + fallback_worklog_records
     _write_artifact_manifest(
         task_dir,
         task_id=task_id,
@@ -611,6 +709,17 @@ def run_weekly_task(task: WeeklyTask, config: dict[str, Any], *, target: str | N
     shutil.copy2(task.metadata_path, task_dir / "metadata.json")
     save_prompt_text(execution_prompt, case_id=case_id, run_dir=str(output_root), tag="prompt")
 
+    worklog_baseline: dict[str, tuple[int, int]] | None
+    try:
+        worklog_baseline = _remote_file_snapshot(
+            list_remote_desktop_worklogs(
+                config["remote_output_roots"], target=target, verbose=verbose
+            )
+        )
+    except Exception as exc:
+        worklog_baseline = None
+        print(f"[{task.task_id}] worklog 基线获取失败，仅使用日志声明路径: {exc}", file=sys.stderr)
+
     before_logs = snapshot(list_remote_logs(target=target, user_id=None, date_id=today_id(), verbose=verbose))
 
     done_log: RemoteLog | None = None
@@ -620,6 +729,8 @@ def run_weekly_task(task: WeeklyTask, config: dict[str, Any], *, target: str | N
     output_records: list[dict[str, Any]] = []
     worklog_records: list[dict[str, Any]] = []
     logged_paths: list[dict[str, Any]] = []
+    desktop_worklog_files: list[RemoteFile] = []
+    worklog_delta_checked = False
     artifacts_collected = False
     try:
         start_prompt(execution_prompt, target=target, verbose=verbose)
@@ -639,12 +750,23 @@ def run_weekly_task(task: WeeklyTask, config: dict[str, Any], *, target: str | N
             start_byte=before_logs.get(done_log.path, (0, 0))[0],
             remote_output_roots=config["remote_output_roots"],
         )
+        try:
+            desktop_worklog_files = changed_desktop_worklogs(
+                worklog_baseline,
+                config["remote_output_roots"],
+                target=target,
+                verbose=verbose,
+            )
+        except Exception as exc:
+            print(f"[{task.task_id}] 桌面 worklog 增量检测失败: {exc}", file=sys.stderr)
+        worklog_delta_checked = True
         output_records, worklog_records = _collect_task_artifacts(
             task_dir,
             task_id=task.task_id,
             target=target,
             verbose=verbose,
             logged_paths=logged_paths,
+            extra_worklog_files=desktop_worklog_files,
         )
         artifacts_collected = True
     except KeyboardInterrupt:
@@ -682,12 +804,21 @@ def run_weekly_task(task: WeeklyTask, config: dict[str, Any], *, target: str | N
 
     if not artifacts_collected:
         try:
+            if not worklog_delta_checked:
+                desktop_worklog_files = changed_desktop_worklogs(
+                    worklog_baseline,
+                    config["remote_output_roots"],
+                    target=target,
+                    verbose=verbose,
+                )
+                worklog_delta_checked = True
             output_records, worklog_records = _collect_task_artifacts(
                 task_dir,
                 task_id=task.task_id,
                 target=target,
                 verbose=verbose,
                 logged_paths=logged_paths,
+                extra_worklog_files=desktop_worklog_files,
             )
         except Exception as exc:
             failure = failure or f"产物拉取失败: {exc}"
@@ -723,11 +854,6 @@ def run_weekly_task(task: WeeklyTask, config: dict[str, Any], *, target: str | N
     mark_case_completed(case_id, str(output_root), result=result)
     print(f"[{task.task_id}] 完成: outputs={result['outputs_pulled']} worklogs={result['worklogs_pulled']}")
     return True
-
-
-def _write_person_marker(path: Path, data: dict[str, Any]) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
 
 
 def _task_handoff_entry(task: WeeklyTask, output_root: Path) -> dict[str, Any]:
@@ -797,8 +923,7 @@ def run_person(person: str, tasks: list[WeeklyTask], config: dict[str, Any], *,
         print(f"[{person}] 任务均已完成，跳过该人员的数据推送与清理")
         return 0, 0, False, False
 
-    lifecycle_log = output_root / f"{person}.{run_date}.lifecycle.log"
-    person_result = output_root / f"{person}.{run_date}.person_result.json"
+    lifecycle_log: Path | None = None
     print(f"\n{'#' * 76}\n人员: {person}，本轮任务 {len(pending)} 个\n{'#' * 76}")
     interrupted = False
     success_count = 0
@@ -850,15 +975,6 @@ def run_person(person: str, tasks: list[WeeklyTask], config: dict[str, Any], *,
         except Exception as exc:
             lifecycle_error = f"中断后清理失败: {exc}"
 
-    if not dry_run:
-        _write_person_marker(person_result, {
-            "person": person,
-            "finished_at": datetime.now().isoformat(timespec="seconds"),
-            "success": success_count,
-            "failed": fail_count,
-            "interrupted": interrupted,
-            "lifecycle_error": lifecycle_error,
-        })
     if interrupted:
         raise KeyboardInterrupt
     return (
