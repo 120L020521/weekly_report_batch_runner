@@ -7,6 +7,7 @@ import argparse
 import hashlib
 import json
 import re
+import shutil
 import sys
 from pathlib import Path
 from typing import Any
@@ -21,7 +22,9 @@ DIRECTORY_RE = re.compile(
     r"^(?P<path>.+?) 是否存在且类型为目录，其直接子项是否恰好为 "
     r"(?P<count>\d+) 个，且完整名称集合为 (?P<names>.*?)？$"
 )
-FILES_MD5_PREFIX = "以下文件是否存在且类型为文件，且 MD5 分别正确："
+FILES_MD5_RUBRIC_RE = re.compile(
+    r"^以下文件是否存在且类型为文件，且 MD5 (?:均)?分别正确：(?P<body>.+)？$"
+)
 FILE_MD5_RE = re.compile(r"^(?P<path>.+?)（(?P<md5>[0-9a-fA-F]{32})）$")
 
 
@@ -113,11 +116,7 @@ def _evaluate_children(
     )
 
 
-def _evaluate_files(outputs: Path, rubric: str) -> tuple[bool, str]:
-    body = rubric[len(FILES_MD5_PREFIX):]
-    if not body.endswith("？"):
-        raise JudgeInputError(f"unsupported MD5 rubric punctuation: {rubric}")
-    body = body[:-1]
+def _evaluate_files(outputs: Path, body: str, rubric: str) -> tuple[bool, str]:
     specifications: list[tuple[str, str]] = []
     for chunk in body.split("、"):
         match = FILE_MD5_RE.fullmatch(chunk.strip())
@@ -169,8 +168,9 @@ def evaluate_rubric(outputs: Path, rubric: str) -> tuple[bool, str]:
             require_directory_phrase=False,
         )
 
-    if rubric.startswith(FILES_MD5_PREFIX):
-        return _evaluate_files(outputs, rubric)
+    files_match = FILES_MD5_RUBRIC_RE.fullmatch(rubric)
+    if files_match is not None:
+        return _evaluate_files(outputs, files_match.group("body"), rubric)
     raise JudgeInputError(f"unsupported FileOrganization rubric: {rubric}")
 
 
@@ -206,7 +206,12 @@ def _fingerprint(metadata_path: Path, outputs: Path) -> dict[str, Any]:
     return {"algorithm": "sha256", "value": value, "fileCount": file_count}
 
 
-def judge_file_organization(metadata_path: Path, outputs: Path) -> dict[str, Any]:
+def judge_file_organization(
+    metadata_path: Path,
+    outputs: Path,
+    *,
+    input_fingerprint: dict[str, Any] | None = None,
+) -> dict[str, Any]:
     metadata_path = metadata_path.expanduser().resolve()
     outputs = outputs.expanduser().resolve()
     if not metadata_path.is_file():
@@ -238,7 +243,11 @@ def judge_file_organization(metadata_path: Path, outputs: Path) -> dict[str, Any
 
     rubric_results: list[dict[str, Any]] = []
     for index, rubric in enumerate(rubrics):
-        passed, evidence = evaluate_rubric(outputs, rubric)
+        try:
+            passed, evidence = evaluate_rubric(outputs, rubric)
+        except JudgeInputError as exc:
+            passed = False
+            evidence = f"unsupported or invalid rubric: {exc}"
         rubric_results.append(
             {
                 "index": index,
@@ -259,7 +268,7 @@ def judge_file_organization(metadata_path: Path, outputs: Path) -> dict[str, Any
         "caseId": case_id,
         "status": "success",
         "judgeType": "deterministic-file-organization",
-        "inputFingerprint": _fingerprint(metadata_path, outputs),
+        "inputFingerprint": input_fingerprint or _fingerprint(metadata_path, outputs),
         "rubrics": rubric_results,
         "summary": {
             "total": total,
@@ -279,6 +288,14 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--metadata", type=Path, required=True)
     parser.add_argument("--outputs", type=Path, required=True)
     parser.add_argument("--result", type=Path, required=True)
+    parser.add_argument(
+        "--case-manifest",
+        type=Path,
+        help=(
+            "Prepared case_manifest.json. When supplied, copy its fingerprint "
+            "and do not create Prepare artifacts."
+        ),
+    )
     return parser
 
 
@@ -291,10 +308,53 @@ def _write_result(path: Path, result: dict[str, Any]) -> None:
     )
 
 
+def _write_halo_context(
+    result_path: Path,
+    metadata_path: Path,
+    outputs: Path,
+    result: dict[str, Any],
+) -> None:
+    result_path = result_path.expanduser().resolve()
+    metadata_path = metadata_path.expanduser().resolve()
+    outputs = outputs.expanduser().resolve()
+    prepared_dir = result_path.parent
+    prepared_dir.mkdir(parents=True, exist_ok=True)
+    frozen_metadata = prepared_dir / "metadata.json"
+    if metadata_path != frozen_metadata:
+        shutil.copy2(metadata_path, frozen_metadata)
+    manifest = {
+        "version": 1,
+        "adapter": "file-organization",
+        "taskId": result["taskId"],
+        "inputFingerprint": result["inputFingerprint"],
+        "sourcePaths": {
+            "metadata": str(metadata_path),
+            "outputs": str(outputs),
+        },
+    }
+    _write_result(prepared_dir / "case_manifest.json", manifest)
+
+
 def main() -> int:
     args = _parser().parse_args()
+    manifest: dict[str, Any] | None = None
     try:
-        result = judge_file_organization(args.metadata, args.outputs)
+        if args.case_manifest is not None:
+            manifest = _load_json_object(args.case_manifest.expanduser().resolve())
+            if manifest.get("adapter") != "file-organization":
+                raise JudgeInputError("case_manifest.adapter must be file-organization")
+            fingerprint = manifest.get("inputFingerprint")
+            if not isinstance(fingerprint, dict):
+                raise JudgeInputError("case_manifest.inputFingerprint must be an object")
+        else:
+            fingerprint = None
+        result = judge_file_organization(
+            args.metadata,
+            args.outputs,
+            input_fingerprint=fingerprint,
+        )
+        if manifest is not None and str(manifest.get("taskId")) != result["taskId"]:
+            raise JudgeInputError("case_manifest.taskId does not match metadata.absolute_id")
     except JudgeInputError as exc:
         error_result = {
             "version": 1,
@@ -303,9 +363,15 @@ def main() -> int:
             "judgeType": "deterministic-file-organization",
             "error": str(exc),
         }
+        if manifest is not None:
+            error_result["taskId"] = str(manifest.get("taskId"))
+            error_result["inputFingerprint"] = manifest.get("inputFingerprint")
         _write_result(args.result, error_result)
         print(str(exc), file=sys.stderr)
         return 2
+    if args.case_manifest is None:
+        # Backward-compatible direct mode. The orchestrated batch path owns Prepare.
+        _write_halo_context(args.result, args.metadata, args.outputs, result)
     _write_result(args.result, result)
     print(json.dumps(result, ensure_ascii=False, indent=2))
     return 0

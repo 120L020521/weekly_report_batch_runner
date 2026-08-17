@@ -43,9 +43,9 @@ def parse_history_json(text: str) -> list[dict[str, Any]]:
 def fetch_history_list(
     *,
     target: str | None,
-    wait_seconds: float = 5,
-    max_retries: int = 3,
-    retry_delay: float = 2,
+    wait_seconds: float = 8,
+    max_retries: int = 6,
+    retry_delay: float = 5,
     verbose: bool = False,
 ) -> list[dict[str, Any]]:
     """Refresh and read XiaoYi's history list."""
@@ -81,11 +81,22 @@ def fetch_history_list(
 
 
 def get_latest_dialog_page_id(
-    *, target: str | None, verbose: bool = False
+    *,
+    target: str | None,
+    wait_seconds: float = 8,
+    max_retries: int = 6,
+    retry_delay: float = 5,
+    verbose: bool = False,
 ) -> str:
     """Return the latest dialogPageId, or an empty string when unavailable."""
     try:
-        history = fetch_history_list(target=target, verbose=verbose)
+        history = fetch_history_list(
+            target=target,
+            wait_seconds=max(0.0, float(wait_seconds)),
+            max_retries=max(1, int(max_retries)),
+            retry_delay=max(0.0, float(retry_delay)),
+            verbose=verbose,
+        )
     except Exception as exc:
         print(f"[dialog-history] 获取 dialogPageId 失败: {exc}", file=sys.stderr)
         return ""

@@ -15,6 +15,9 @@
   "require_worklog": true,
   "auto_continue": true,
   "max_continue_rounds": 3,
+  "history_initial_wait_seconds": 8,
+  "history_max_retries": 6,
+  "history_retry_delay_seconds": 5,
   "prompt_suffix": "生成的worklog文件夹和周报文件放到桌面上，并在最终回复中分别给出worklog文件夹和周报文件的桌面绝对路径",
   "remote_output_roots": {
     "Desktop": "/storage/media/100/local/files/Docs/Desktop"

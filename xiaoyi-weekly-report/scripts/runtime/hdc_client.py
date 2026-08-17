@@ -9,9 +9,7 @@ import os
 import re
 import shutil
 import subprocess
-import time
 from dataclasses import dataclass
-from datetime import datetime
 from typing import Iterable
 
 HDC_BIN_NAME = "hdc.exe" if os.name == "nt" else "hdc"
@@ -36,73 +34,6 @@ class RemoteLog:
     mtime: int
 
 
-# ---------------------------------------------------------------------------
-# HDC 命令日志记录器
-# ---------------------------------------------------------------------------
-# 全局单例。run_test.py 通过 set_hdc_logger(...) 启用；
-# 不调用时为 None，run_hdc 完全不落盘，保持原有行为。
-_hdc_logger: "HdcCommandLogger | None" = None
-
-
-class HdcCommandLogger:
-    """把每条 hdc 命令（命令行、退出码、耗时、stdout 摘要）追加写到日志文件。
-
-    线程不安全；当前 batch runner 为单线程顺序执行，可直接使用。
-    """
-
-    _STDOUT_SUMMARY_LIMIT = 500
-
-    def __init__(self, log_path: str):
-        self.log_path = log_path
-        os.makedirs(os.path.dirname(os.path.abspath(log_path)), exist_ok=True)
-        # 追加写一个文件头，方便区分多次运行共用同一文件的情况
-        with open(self.log_path, "a", encoding="utf-8") as f:
-            f.write(
-                f"\n# ==== hdc command log opened at {datetime.now().isoformat(timespec='seconds')} ====\n"
-            )
-
-    def log(
-        self,
-        *,
-        cmd: list[str],
-        returncode: int | None,
-        elapsed: float,
-        stdout: str = "",
-        stderr: str = "",
-        error: str | None = None,
-    ) -> None:
-        ts = datetime.now().isoformat(timespec="seconds")
-        cmd_text = " ".join(cmd)
-        stdout_summary = (stdout or "").strip()
-        if len(stdout_summary) > self._STDOUT_SUMMARY_LIMIT:
-            stdout_summary = stdout_summary[: self._STDOUT_SUMMARY_LIMIT] + f"...(+{len(stdout) - self._STDOUT_SUMMARY_LIMIT} bytes)"
-        stderr_summary = (stderr or "").strip()
-        if len(stderr_summary) > self._STDOUT_SUMMARY_LIMIT:
-            stderr_summary = stderr_summary[: self._STDOUT_SUMMARY_LIMIT] + f"...(+{len(stderr) - self._STDOUT_SUMMARY_LIMIT} bytes)"
-
-        lines = [
-            f"[{ts}] CMD: {cmd_text}",
-            f"          rc={'<timeout>' if returncode is None else returncode} elapsed={elapsed:.3f}s",
-        ]
-        if error:
-            lines.append(f"          ERROR: {error}")
-        if stdout_summary:
-            lines.append(f"          OUT: {stdout_summary}")
-        if stderr_summary:
-            lines.append(f"          ERR: {stderr_summary}")
-        try:
-            with open(self.log_path, "a", encoding="utf-8") as f:
-                f.write("\n".join(lines) + "\n")
-        except OSError:
-            pass
-
-
-def set_hdc_logger(logger: "HdcCommandLogger | None") -> None:
-    """安装/卸载全局 hdc 命令日志记录器。"""
-    global _hdc_logger
-    _hdc_logger = logger
-
-
 def hdc_path() -> str:
     path = shutil.which(HDC_BIN_NAME) or shutil.which("hdc")
     if not path:
@@ -114,7 +45,6 @@ def run_hdc(args: list[str], *, timeout: int, verbose: bool = False) -> str:
     cmd = [hdc_path(), *args]
     if verbose:
         print("[hdc]", " ".join(cmd))
-    started = time.monotonic()
     try:
         proc = subprocess.run(
             cmd,
@@ -128,27 +58,7 @@ def run_hdc(args: list[str], *, timeout: int, verbose: bool = False) -> str:
             creationflags=CREATE_NO_WINDOW,
         )
     except subprocess.TimeoutExpired as exc:
-        elapsed = time.monotonic() - started
-        if _hdc_logger:
-            _hdc_logger.log(
-                cmd=cmd,
-                returncode=None,
-                elapsed=elapsed,
-                stdout=exc.stdout or "",
-                stderr=exc.stderr or "",
-                error=f"timeout after {timeout}s",
-            )
         raise HdcError(f"hdc 命令超时：{' '.join(cmd)}", stdout=exc.stdout or "", stderr=exc.stderr or "") from exc
-
-    elapsed = time.monotonic() - started
-    if _hdc_logger:
-        _hdc_logger.log(
-            cmd=cmd,
-            returncode=proc.returncode,
-            elapsed=elapsed,
-            stdout=proc.stdout,
-            stderr=proc.stderr,
-        )
 
     if proc.returncode != 0:
         raise HdcError(

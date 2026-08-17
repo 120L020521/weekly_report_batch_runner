@@ -3,13 +3,14 @@ name: xiaoyi-weekly-report
 description: >-
   Run HarmonyOS XiaoYi weekly-report and daily-report batches from external
   per-person deliverables_final data and numeric metadata.json tasks marked
-  adapter: weekly-report. Use for Runner-only report generation that must push
+  adapter: weekly-report. Use for report generation Runner execution that must push
   each person's files, calendar, and memos once; execute that person's selected
   tasks serially; automatically continue the same XiaoYi dialog through
   confirmation, choice, or retry stops; pull log-declared reports and worklogs;
   fetch evidence; and clear the device before the next person. All executable
   code and default configuration are bundled in this Skill; task and deliverable
-  data remain external.
+  data remain external. Return a deterministic batch handoff that a parent
+  run-xiaoyi coordinator can pass to the shared Judge and HALO skills.
 ---
 
 # Run XiaoYi Weekly Reports
@@ -58,7 +59,11 @@ Desktop, Documents, and Download, then push that person's data. For each person:
 4. After every `stop_reason=stop`, read the latest main-Agent reply. Treat an
    explicit confirmation/permission/choice gate, a future-only plan, or a
    partial/failed result as incomplete. Refresh the history list only when a
-   continuation is required, save the latest `dialogPageId`, and resume the same
+   continuation is required. After starting the history-list ability, wait eight
+   seconds by default, then read `history_list.json` up to six times with a
+   five-second retry interval. Keep these values configurable through
+   `history_initial_wait_seconds`, `history_max_retries`, and
+   `history_retry_delay_seconds`. Save the latest `dialogPageId`, and resume the same
    dialog with `pc_agent_task_start + historySessionId`. Send an affirmative reply
    that preserves the original time range, content, and output format. Allow at
    most three continuation pushes by default; never clear, re-push person data,
@@ -99,10 +104,19 @@ Task through `PCAgentTaskAbility` is the relaunch point.
 Automatic continuation is enabled by `auto_continue: true`; keep it enabled for
 normal runs. `max_continue_rounds` defaults to `3`, giving four pushes total
 (initial plus three continuations), matching `xiaoyi-auto-continue`. If the reply
-still blocks or remains incomplete after the budget, or no `dialogPageId` can be
-resolved, fail that Task, collect available evidence, stop XiaoYi once, and then
-follow the selected batch failure policy. Do not interpret a courtesy question
-after a concrete completion statement as another confirmation gate.
+still blocks or remains incomplete after the budget, preserve that as an execution
+failure. If no `dialogPageId` can be resolved, stop continuation, record a Runner
+warning, and finish collecting the current Trace, report, and worklog. Mark the Task
+complete when those artifacts pass the Runner's operational collection checks so
+the shared Judge can determine content correctness; otherwise mark the concrete
+collection failure. Do not interpret a courtesy question after a concrete completion
+statement as another confirmation gate.
+
+Keep Runner and Judge responsibilities separate. Runner may validate HDC execution,
+Trace/log availability, concrete artifact paths, successful pulls, and the required
+worklog collection policy. It must not read `rubrics` to infer required formats or
+decide whether report content, time range, identity, structure, or facts are correct.
+Those checks belong exclusively to the downstream Judge.
 
 ## Execute
 
@@ -119,8 +133,7 @@ Run a selected batch:
 & <python> -B "<skill_root>\scripts\run_weekly.py" `
   --project-root "<data_root>" `
   --person "<person>" `
-  --task "<numeric_id>" `
-  --log-hdc
+  --task "<numeric_id>"
 ```
 
 Repeat `--person` and `--task` as required. Omit both only when the user explicitly
@@ -149,8 +162,11 @@ it merely because output is quiet.
 
 ## Return the Runner handoff
 
-This Skill is Runner-only. If asked for Judge, scoring, HALO, or diagnosis, return
-`unsupported-stage` before HDC.
+This Skill owns only the Runner stage. Never score artifacts or diagnose traces
+inside this Skill. When a parent `run-xiaoyi` coordinator requests Judge or HALO,
+finish the selected Runner batch normally and return its handoff so the parent can
+invoke the shared downstream skills. When invoked directly, stop after returning
+the handoff and state that downstream stages require `run-xiaoyi`.
 
 After a normal batch, require:
 
@@ -174,10 +190,33 @@ Store each Task's Runner evidence in one prefixed directory:
 ```
 
 Do not create `.run`, `_runs`, `run_<date>`, lifecycle, or person-result files.
-Store only `weekly_runner_batch.json` and, when `--log-hdc` is selected,
-`hdc_commands_<YYYYMMDD>.log` as batch-level evidence under `<output_root>`.
+Do not create batch-level lifecycle or HDC command logs. Stream helper-process and
+HDC diagnostics to the invoking console only. The only batch-level file created by
+Runner is `weekly_runner_batch.json`; per-Task evidence remains under `task<ID>/`.
+
+For every selected Task, require the handoff entry to include these exact Judge
+inputs after that person's fetch stage has completed:
+
+```text
+judgeInputs.metadata      = <metadata_root>/<person>/<ID>/metadata.json
+judgeInputs.data          = <metadata_root>/<person>/data
+judgeInputs.outputs       = <output_root>/task<ID>/outputs
+judgeInputs.runnerTaskDir = <output_root>/task<ID>
+```
+
+Write `runnerFinished = true` only after every selected person's Tasks, fetch, and
+cleanup lifecycle has returned. A parent coordinator must not start Judge before
+that final handoff exists.
 
 Verify that `adapter` is `weekly-report`, `runnerFinished` is true, and every
 selected Task appears exactly once. Return the handoff path and one row per Task
 with person, Task ID, Runner outcome, Trace path, and outputs directory. Use the
 handoff outcome and Task marker rather than process exit alone to determine success.
+Record a non-fatal history/continuation issue under `completed.json.result.warnings`
+and `task<ID>.meta.json.runner_warnings`; do not create `failed.json` for that issue
+when the required Runner evidence was collected successfully.
+
+Treat `weekly_runner_batch.json` as the only downstream interface. A Judge or
+HALO coordinator must consume the exact paths recorded there; it must not rediscover
+Tasks by scanning `xiaoyi_logs`, rerun XiaoYi, or infer one person's evidence from
+another person's directory.

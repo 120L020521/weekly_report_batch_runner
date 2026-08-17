@@ -25,7 +25,6 @@ from .case_manager import (
 )
 from .dialog_history import get_latest_dialog_page_id
 from .hdc_client import (
-    HdcCommandLogger,
     HdcError,
     RemoteLog,
     changed_logs,
@@ -33,7 +32,6 @@ from .hdc_client import (
     list_remote_logs,
     remote_shell,
     run_hdc,
-    set_hdc_logger,
     shell_quote,
     snapshot,
     target_args,
@@ -75,6 +73,9 @@ DEFAULTS: dict[str, Any] = {
     "require_worklog": True,
     "auto_continue": True,
     "max_continue_rounds": 3,
+    "history_initial_wait_seconds": 8,
+    "history_max_retries": 6,
+    "history_retry_delay_seconds": 5,
     "prompt_suffix": "生成的worklog文件夹和周报文件放到桌面上，并在最终回复中分别给出worklog文件夹和周报文件的桌面绝对路径",
     "remote_output_roots": {
         "Desktop": "/storage/media/100/local/files/Docs/Desktop",
@@ -127,6 +128,22 @@ _FUTURE_ONLY_PATTERNS = tuple(
     for pattern in (
         r"(?:准备|接下来|下一步|将会|将要).{0,20}(?:生成|创建|保存|整理|读取)",
         r"待确认|等待确认",
+    )
+)
+_COMPLETION_PATTERNS = tuple(
+    re.compile(pattern, flags=re.IGNORECASE | re.DOTALL)
+    for pattern in (
+        r"(?:周报|日报|报告|worklog|工作日志|工作记录).{0,24}(?:已|已经)(?:生成|创建|保存|完成)",
+        r"(?:已|已经)(?:生成|创建|保存|完成).{0,24}(?:周报|日报|报告|worklog|工作日志|工作记录)",
+        r"(?:任务|处理).{0,12}(?:已完成|已经完成|完成成功)",
+    )
+)
+_COURTESY_QUESTION_PATTERNS = tuple(
+    re.compile(pattern, flags=re.IGNORECASE | re.DOTALL)
+    for pattern in (
+        r"(?:还有|有).{0,20}(?:其他|其它).{0,20}(?:需要|可以|帮忙)",
+        r"是否还需要(?:我)?.{0,24}(?:处理|协助|帮忙|调整|修改)",
+        r"如(?:还)?需(?:要)?.{0,24}(?:处理|协助|调整|修改).{0,8}(?:请告诉我|请告知)",
     )
 )
 
@@ -254,10 +271,14 @@ def classify_stop_content(content: str | None) -> str:
     text = (content or "").strip()
     if not text:
         return "missing-content"
-    if any(pattern.search(text) for pattern in _CONFIRMATION_PATTERNS):
-        return "needs-confirmation"
     if any(pattern.search(text) for pattern in _PARTIAL_OR_FAILURE_PATTERNS):
         return "partial-or-failed"
+    completed = any(pattern.search(text) for pattern in _COMPLETION_PATTERNS)
+    courtesy = any(pattern.search(text) for pattern in _COURTESY_QUESTION_PATTERNS)
+    if completed and courtesy:
+        return "complete"
+    if any(pattern.search(text) for pattern in _CONFIRMATION_PATTERNS):
+        return "needs-confirmation"
     if any(pattern.search(text) for pattern in _FUTURE_ONLY_PATTERNS):
         return "needs-confirmation"
     return "complete"
@@ -292,6 +313,7 @@ def _save_dialog_state(
     round_number: int,
     verdict: str,
     continue_queries: list[str],
+    warnings: list[str] | None = None,
 ) -> None:
     meta_path = task_dir / f"{task_dir.name}.meta.json"
     meta: dict[str, Any] = {}
@@ -310,6 +332,8 @@ def _save_dialog_state(
             "continue_queries": continue_queries,
         }
     )
+    if warnings is not None:
+        meta["runner_warnings"] = list(warnings)
     meta_path.write_text(
         json.dumps(meta, ensure_ascii=False, indent=2), encoding="utf-8"
     )
@@ -509,10 +533,8 @@ def _group_by_person(tasks: Iterable[WeeklyTask]) -> list[tuple[str, list[Weekly
     )
 
 
-def _stream_command(cmd: list[str], *, cwd: Path, log_path: Path | None = None) -> None:
+def _stream_command(cmd: list[str], *, cwd: Path) -> None:
     print("$", " ".join(cmd))
-    if log_path:
-        log_path.parent.mkdir(parents=True, exist_ok=True)
     proc = subprocess.Popen(
         cmd,
         cwd=str(cwd),
@@ -524,16 +546,8 @@ def _stream_command(cmd: list[str], *, cwd: Path, log_path: Path | None = None) 
         creationflags=CREATE_NO_WINDOW,
     )
     assert proc.stdout is not None
-    log_handle = log_path.open("a", encoding="utf-8") if log_path else None
-    try:
-        for line in proc.stdout:
-            print(line, end="")
-            if log_handle:
-                log_handle.write(line)
-                log_handle.flush()
-    finally:
-        if log_handle:
-            log_handle.close()
+    for line in proc.stdout:
+        print(line, end="")
     returncode = proc.wait()
     if returncode != 0:
         raise RuntimeError(f"子流程失败(exit={returncode}): {' '.join(cmd)}")
@@ -543,8 +557,7 @@ def _helper_command(script: Path, *args: str) -> list[str]:
     return [sys.executable, "-B", str(script), *args]
 
 
-def _call_clear(config: dict[str, Any], *, target: str | None, dry_run: bool,
-                lifecycle_log: Path | None) -> None:
+def _call_clear(config: dict[str, Any], *, target: str | None, dry_run: bool) -> None:
     cmd = _helper_command(
         config["scripts_root"] / "clear_person_data.py",
         "--cal-start", str(config["calendar_start"]),
@@ -555,11 +568,11 @@ def _call_clear(config: dict[str, Any], *, target: str | None, dry_run: bool,
         cmd.extend(["--device", target])
     if dry_run:
         cmd.append("--dry-run")
-    _stream_command(cmd, cwd=WORKSPACE_ROOT, log_path=lifecycle_log)
+    _stream_command(cmd, cwd=WORKSPACE_ROOT)
 
 
 def _call_push(person: str, config: dict[str, Any], *, target: str | None,
-               dry_run: bool, lifecycle_log: Path | None) -> None:
+               dry_run: bool) -> None:
     person_dir = config["deliverables_root"] / person
     cmd = _helper_command(
         config["scripts_root"] / "push_person_data.py",
@@ -571,11 +584,11 @@ def _call_push(person: str, config: dict[str, Any], *, target: str | None,
         cmd.extend(["--device", target])
     if dry_run:
         cmd.append("--dry-run")
-    _stream_command(cmd, cwd=WORKSPACE_ROOT, log_path=lifecycle_log)
+    _stream_command(cmd, cwd=WORKSPACE_ROOT)
 
 
 def _call_fetch(person: str, config: dict[str, Any], *, target: str | None,
-                dry_run: bool, lifecycle_log: Path | None) -> None:
+                dry_run: bool) -> None:
     cmd = _helper_command(
         config["scripts_root"] / "fetch_device_data.py",
         "--person", person,
@@ -589,7 +602,7 @@ def _call_fetch(person: str, config: dict[str, Any], *, target: str | None,
         cmd.extend(["--device", target])
     if dry_run:
         cmd.append("--dry-run")
-    _stream_command(cmd, cwd=WORKSPACE_ROOT, log_path=lifecycle_log)
+    _stream_command(cmd, cwd=WORKSPACE_ROOT)
 
 
 def _safe_relative(remote_file: RemoteFile) -> Path:
@@ -652,13 +665,6 @@ def wait_for_new_stop(*, task_id: str, before: dict[str, tuple[int, int]],
             last_message = time.monotonic()
         time.sleep(poll_seconds)
     raise TaskTimeoutError(f"{task_id} 等待新 stop_reason=stop 超时", active_log=active_log)
-
-
-def _required_formats(metadata: dict[str, Any]) -> set[str]:
-    formats: set[str] = set()
-    for rubric in metadata.get("rubrics", []):
-        formats.update(re.findall(r"\(\.(md|html|docx)\)", str(rubric), flags=re.IGNORECASE))
-    return {fmt.lower() for fmt in formats}
 
 
 def _present_formats(outputs_dir: Path) -> set[str]:
@@ -794,14 +800,12 @@ def run_weekly_task(task: WeeklyTask, config: dict[str, Any], *, target: str | N
     output_root: Path = config["output_root"]
     case_id = _task_case_id(task.task_id)
     task_dir = output_root / case_id
-    required_formats = _required_formats(task.metadata)
     execution_prompt = _build_execution_prompt(task.metadata["task"], config.get("prompt_suffix"))
     if not rerun and is_case_completed(case_id, str(output_root)):
         print(f"[{task.task_id}] 已完成，跳过")
         return True
 
     print(f"\n{'=' * 70}\n[{task.task_id}] {task.person}: {task.metadata['task']}\n{'=' * 70}")
-    print(f"[{task.task_id}] 要求格式: {', '.join(sorted(required_formats)) or '(未指定)'}")
     if dry_run:
         print(f"[{task.task_id}] [DRY-RUN] execution prompt:\n{execution_prompt}")
         print(f"[{task.task_id}] [DRY-RUN] 将推送 metadata.task、监控日志并拉取增量周报/worklog")
@@ -839,6 +843,7 @@ def run_weekly_task(task: WeeklyTask, config: dict[str, Any], *, target: str | N
     artifacts_collected = False
     dialog_page_id = ""
     continue_queries: list[str] = []
+    runner_warnings: list[str] = []
     round_number = 0
     dialog_verdict = "not-started"
     max_continue_rounds = max(0, int(config.get("max_continue_rounds", 3)))
@@ -904,10 +909,19 @@ def run_weekly_task(task: WeeklyTask, config: dict[str, Any], *, target: str | N
             if not dialog_page_id:
                 print(f"[{task.task_id}] 获取当前对话 dialogPageId...")
                 dialog_page_id = get_latest_dialog_page_id(
-                    target=target, verbose=verbose
+                    target=target,
+                    wait_seconds=float(config.get("history_initial_wait_seconds", 8)),
+                    max_retries=int(config.get("history_max_retries", 6)),
+                    retry_delay=float(config.get("history_retry_delay_seconds", 5)),
+                    verbose=verbose,
                 )
                 if not dialog_page_id:
-                    failure = "小艺需要二次确认，但未获取到 dialogPageId"
+                    warning = (
+                        "小艺回复仍需续接，但 history_list.json 未提供 dialogPageId；"
+                        "停止续接并按已回收的 Runner 证据决定状态"
+                    )
+                    runner_warnings.append(warning)
+                    print(f"[{task.task_id}] WARNING: {warning}", file=sys.stderr)
                     break
 
             continue_query = build_continue_query(dialog_verdict)
@@ -1026,15 +1040,20 @@ def run_weekly_task(task: WeeklyTask, config: dict[str, Any], *, target: str | N
     elif not output_records and not worklog_records:
         failure = failure or "日志中的产物路径在设备上不存在或不含文件"
     present_formats = _present_formats(task_dir / "outputs")
-    missing_formats = required_formats - present_formats
-    if missing_formats:
-        failure = failure or f"缺少要求的输出格式: {', '.join(sorted(missing_formats))}"
     if config.get("require_worklog") and not worklog_records:
         failure = failure or "未发现本任务新增/修改的 worklog"
 
+    _save_dialog_state(
+        task_dir,
+        dialog_page_id=dialog_page_id,
+        round_number=round_number,
+        verdict=dialog_verdict,
+        continue_queries=continue_queries,
+        warnings=runner_warnings,
+    )
+
     result = {
         "person": task.person,
-        "required_formats": sorted(required_formats),
         "present_formats": sorted(present_formats),
         "outputs_pulled": sum(1 for item in output_records if item.get("status") == "pulled"),
         "worklogs_pulled": sum(1 for item in worklog_records if item.get("status") == "pulled"),
@@ -1042,6 +1061,7 @@ def run_weekly_task(task: WeeklyTask, config: dict[str, Any], *, target: str | N
         "pushes": 1 + len(continue_queries),
         "dialog_verdict": dialog_verdict,
         "continue_queries": continue_queries,
+        "warnings": runner_warnings,
     }
     if interrupted:
         mark_case_interrupted(case_id, str(output_root))
@@ -1072,15 +1092,59 @@ def _task_handoff_entry(task: WeeklyTask, output_root: Path) -> dict[str, Any]:
             marker_path = candidate
             break
     trace_path = task_dir / f"{case_id}.jsonl"
+    metadata_path = task.metadata_path.resolve()
+    person_data = (task.metadata_path.parent.parent / "data").resolve()
+    outputs_path = (task_dir / "outputs").resolve()
+    runner_task_dir = task_dir.resolve()
     return {
         "taskId": task.task_id,
         "person": task.person,
         "executionOutcome": outcome,
-        "metadata": str(task.metadata_path.resolve()),
+        "metadata": str(metadata_path),
         "trace": str(trace_path.resolve()) if trace_path.is_file() else None,
-        "outputs": str((task_dir / "outputs").resolve()),
+        "outputs": str(outputs_path),
         "marker": str(marker_path.resolve()) if marker_path else None,
+        "judgeInputs": {
+            "metadata": str(metadata_path),
+            "data": str(person_data),
+            "outputs": str(outputs_path),
+            "runnerTaskDir": str(runner_task_dir),
+        },
     }
+
+
+def _handoff_inputs_ready(entries: Iterable[dict[str, Any]]) -> bool:
+    terminal = {"complete", "failed", "interrupted"}
+    for entry in entries:
+        if entry.get("executionOutcome") not in terminal:
+            return False
+        if entry.get("executionOutcome") != "complete":
+            continue
+        judge_inputs = entry.get("judgeInputs")
+        if not isinstance(judge_inputs, dict):
+            return False
+        required_paths = {
+            "metadata": "file",
+            "data": "dir",
+            "outputs": "dir",
+            "runnerTaskDir": "dir",
+        }
+        for name, kind in required_paths.items():
+            value = judge_inputs.get(name)
+            if not isinstance(value, str) or not value:
+                return False
+            path = Path(value)
+            if kind == "file" and not path.is_file():
+                return False
+            if kind == "dir" and not path.is_dir():
+                return False
+        trace = entry.get("trace")
+        marker = entry.get("marker")
+        if not isinstance(trace, str) or not Path(trace).is_file():
+            return False
+        if not isinstance(marker, str) or not Path(marker).is_file():
+            return False
+    return True
 
 
 def write_weekly_runner_handoff(
@@ -1089,11 +1153,12 @@ def write_weekly_runner_handoff(
     output_root: Path = config["output_root"]
     handoff_path = output_root / "weekly_runner_batch.json"
     entries = [_task_handoff_entry(task, output_root) for task in tasks]
+    effective_runner_finished = runner_finished and _handoff_inputs_ready(entries)
     payload = {
         "version": 1,
         "adapter": "weekly-report",
         "runId": run_date,
-        "runnerFinished": runner_finished,
+        "runnerFinished": effective_runner_finished,
         "writtenAt": datetime.now().isoformat(timespec="seconds"),
         "roots": {
             "metadata": str(Path(config["metadata_root"]).resolve()),
@@ -1112,7 +1177,7 @@ def run_person(person: str, tasks: list[WeeklyTask], config: dict[str, Any], *,
                target: str | None, verbose: bool, dry_run: bool, rerun: bool,
                stop_on_error: bool, skip_push: bool, skip_fetch: bool,
                skip_clear: bool, skip_initial_clear: bool,
-               clear_on_interrupt: bool, run_date: str) -> tuple[int, int, bool, bool]:
+               clear_on_interrupt: bool) -> tuple[int, int, bool, bool]:
     output_root: Path = config["output_root"]
     pending = tasks if rerun else [
         task for task in tasks
@@ -1122,7 +1187,6 @@ def run_person(person: str, tasks: list[WeeklyTask], config: dict[str, Any], *,
         print(f"[{person}] 任务均已完成，跳过该人员的数据推送与清理")
         return 0, 0, False, False
 
-    lifecycle_log: Path | None = None
     print(f"\n{'#' * 76}\n人员: {person}，本轮任务 {len(pending)} 个\n{'#' * 76}")
     interrupted = False
     success_count = 0
@@ -1132,9 +1196,9 @@ def run_person(person: str, tasks: list[WeeklyTask], config: dict[str, Any], *,
     try:
         if config.get("clear_before_person") and not skip_initial_clear:
             print(f"[{person}] 推送前清理设备，确保人员数据隔离")
-            _call_clear(config, target=target, dry_run=dry_run, lifecycle_log=lifecycle_log)
+            _call_clear(config, target=target, dry_run=dry_run)
         if not skip_push:
-            _call_push(person, config, target=target, dry_run=dry_run, lifecycle_log=lifecycle_log)
+            _call_push(person, config, target=target, dry_run=dry_run)
         for index, task in enumerate(pending, 1):
             print(f"[{person}] 任务进度 {index}/{len(pending)}")
             ok = run_weekly_task(task, config, target=target, verbose=verbose, dry_run=dry_run, rerun=rerun)
@@ -1156,20 +1220,20 @@ def run_person(person: str, tasks: list[WeeklyTask], config: dict[str, Any], *,
     if not interrupted:
         if not skip_fetch:
             try:
-                _call_fetch(person, config, target=target, dry_run=dry_run, lifecycle_log=lifecycle_log)
+                _call_fetch(person, config, target=target, dry_run=dry_run)
             except Exception as exc:
                 lifecycle_error = lifecycle_error or f"设备数据拉取失败: {exc}"
                 print(f"[{person}] {lifecycle_error}", file=sys.stderr)
         if not skip_clear:
             try:
-                _call_clear(config, target=target, dry_run=dry_run, lifecycle_log=lifecycle_log)
+                _call_clear(config, target=target, dry_run=dry_run)
                 cleanup_succeeded = True
             except Exception as exc:
                 lifecycle_error = lifecycle_error or f"人员数据清理失败: {exc}"
                 print(f"[{person}] {lifecycle_error}", file=sys.stderr)
     elif clear_on_interrupt and not skip_clear:
         try:
-            _call_clear(config, target=target, dry_run=dry_run, lifecycle_log=lifecycle_log)
+            _call_clear(config, target=target, dry_run=dry_run)
             cleanup_succeeded = True
         except Exception as exc:
             lifecycle_error = f"中断后清理失败: {exc}"
@@ -1214,7 +1278,6 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--skip-initial-clear", action="store_true")
     parser.add_argument("--clear-on-interrupt", action="store_true")
     parser.add_argument("--verbose", "-v", action="store_true")
-    parser.add_argument("--log-hdc", action="store_true")
     args = parser.parse_args(argv)
 
     config_path = Path(args.config)
@@ -1248,9 +1311,6 @@ def main(argv: list[str] | None = None) -> int:
 
     output_root: Path = config["output_root"]
     output_root.mkdir(parents=True, exist_ok=True)
-    if args.log_hdc and not args.dry_run:
-        hdc_log = output_root / f"hdc_commands_{args.date}.log"
-        set_hdc_logger(HdcCommandLogger(str(hdc_log)))
     if not args.dry_run:
         _preflight_hdc(target)
 
@@ -1290,7 +1350,6 @@ def main(argv: list[str] | None = None) -> int:
                 skip_clear=args.skip_clear,
                 skip_initial_clear=skip_initial_clear,
                 clear_on_interrupt=args.clear_on_interrupt,
-                run_date=args.date,
             )
             total_success += success
             total_failed += failed
@@ -1307,9 +1366,6 @@ def main(argv: list[str] | None = None) -> int:
             print(f"未完成 handoff: {handoff_path}", file=sys.stderr)
         print("\n批跑被手动中断；默认保留当前人员设备数据，便于排查。", file=sys.stderr)
         return 130
-    finally:
-        set_hdc_logger(None)
-
     if not args.dry_run:
         handoff_path = write_weekly_runner_handoff(
             tasks, config, run_date=args.date, runner_finished=True

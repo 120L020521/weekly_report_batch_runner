@@ -1,123 +1,140 @@
 ---
 name: judge-xiaoyi-results
 description: >-
-  Judge XiaoYi result artifacts without running XiaoYi or calling an external
-  Judge API. Use for FileOrganization_* cases backed by a final outputs directory
-  plus metadata.json rubrics, and for prepared numeric WorkspaceBench Task
-  directories backed by metadata.json, case_manifest.json, agent.json,
-  normalized_runner_log.jsonl, and output/. Supports Judge-only requests,
-  re-Judge, scoring, and the post-run batch Judge phase delegated by run-xiaoyi,
-  run-xiaoyi-loop, or run-xiaoyi-halo-loop.
+  Judge frozen XiaoYi artifacts through one unified batch input, common Prepare
+  layout, common result schema, and adapter-specific evaluators. Use after a
+  complete FileOrganization, WorkspaceBench, or weekly-report Runner batch; for
+  Judge-only or re-Judge requests backed by an explicit judge_batch.json; and as
+  the Judge stage inside run-xiaoyi. Never runs XiaoYi or mutates device state.
 ---
 
 # Judge XiaoYi Results
 
-Evaluate frozen local evidence only. Never launch XiaoYi, use HDC, clean device
-files, continue a dialog, call an external Judge/model API, or request a Judge
-API key.
+Evaluate frozen local evidence only. Never launch XiaoYi, use HDC, continue a
+dialog, clean the device, call an external Judge API, or infer missing paths by
+scanning directories.
 
-## Select exactly one adapter
+## Unified batch input
 
-Choose `file-organization` when all of these hold:
+Accept exactly one Agent-written `judge_batch.json` after the whole Runner batch
+is terminal:
 
-- the selector matches `^FileOrganization_[0-9]+_[0-9]+$`;
-- `metadata.json.absolute_id` matches that selector;
-- the evidence is one final `outputs/` tree containing `Desktop/`, `Download/`,
-  and `Documents/`.
-
-Choose `workspacebench` when the selector is a non-negative numeric Task ID and
-the prepared directory contains `metadata.json`, `case_manifest.json`,
-`agent.json`, `normalized_runner_log.jsonl`, and `output/`.
-
-Do not reinterpret a FileOrganization numeric suffix as a WorkspaceBench Task
-ID. Reject mixed batches before evaluation. Judge existing artifacts only; a
-missing input is a Judge error, not permission to rerun the task.
-
-## File-organization adapter
-
-Treat `metadata.json.rubrics` as the complete final-state contract. Do not read
-the original prompt, setup.json, expect.json, source files, JSONL, content.txt,
-completed.json, or XiaoYi's claims to change the score.
-
-Accept `<run_dir>/runner_batch.json` containing `version = 1`,
-`adapter = "file-organization"`, `runnerFinished = true`, `runDir`, ordered case
-IDs, terminal execution outcomes, metadata paths, and final outputs paths. Refuse
-to start if the file is missing, any selected case is omitted/duplicated/reordered,
-an outcome is not `complete`, `incomplete-after-3-continues`, or
-`execution-error`, or any selected case is still running or waiting for a
-continue decision. Use:
-
-```text
-<judge_batch_dir> = <agent_workspace>/xiaoyi_judge/file-organization/<run_id>
-<case_result> = <judge_batch_dir>/<case_id>/judge_result.json
-<batch_summary> = <judge_batch_dir>/batch_summary.json
+```json
+{
+  "schema_version": 1,
+  "producer": "run-xiaoyi",
+  "runner_finished": true,
+  "run_id": "20260817",
+  "judge_root": "D:/workspace/xiaoyi_judge/20260817",
+  "tasks": [
+    {
+      "task_id": "21",
+      "adapter": "weekly-report",
+      "runner_status": "completed",
+      "metadata": "D:/workspace/task/何沐/21/metadata.json",
+      "data": "D:/workspace/task/何沐/data",
+      "outputs": "D:/workspace/xiaoyi_logs/task21/outputs",
+      "runner_dir": "D:/workspace/xiaoyi_logs/task21",
+      "trace": "D:/workspace/xiaoyi_logs/task21/task21.jsonl",
+      "judge_dir": "D:/workspace/xiaoyi_judge/20260817/task21"
+    }
+  ]
+}
 ```
 
-Build a queue of Judgeable cases. Record missing metadata, missing outputs, or an
-incomplete outputs manifest as case-level Judge input errors without rerunning
-XiaoYi. Assign every remaining case to exactly one fresh Judge subagent. Run up
-to the available concurrency limit, wait for completions, and fill freed slots
-until the queue is empty. Never give one subagent multiple cases.
+Require globally unique ordered string IDs, one of `file-organization`,
+`workspacebench`, or `weekly-report`, normalized Runner status, explicit absolute
+paths, and a unique `judge_dir` below `judge_root`. Optional `data`, `runner_dir`,
+and `trace` may be `null`; every path key must still exist. Only
+`runner_status = completed` is Judgeable.
 
-Give a file-organization Judge subagent only the shared Judge Skill root, case
-ID, metadata path, outputs path, and result path. Require it to run the bundled
-deterministic evaluator once and modify only its assigned result path:
+## Common Prepare
+
+Run once for the whole batch:
+
+```powershell
+& <python> -B "<skill_root>\scripts\judge_batch.py" prepare `
+  --batch "<judge_batch.json>"
+```
+
+Do not pass `--force` unless the user explicitly requests re-Judge. Read the
+returned `judge_queue.json`. Every ready task has the same frozen structure:
+
+```text
+<judge_dir>/
+├── metadata.json
+├── case_manifest.json
+├── data/                 # only when supplied
+├── output/
+└── runner/               # only when runner_dir or trace is supplied
+```
+
+Prepare copies only declared sources, omits an embedded runner `output/` or
+`outputs/` subtree, fingerprints the frozen evidence, and records exact source
+paths in `case_manifest.json`. `runner-failure` and `input-error` queue entries
+are terminal and must not be repaired or sent to an evaluator.
+
+Every queue row also preserves the explicit source `metadata` and raw `trace`
+paths. HALO consumes this same `judge_queue.json` after Judge; do not generate a
+second HALO handoff.
+
+`metadata.json` and `case_manifest.json` are Judge inputs. They are produced by
+the common Prepare stage, never by an adapter evaluator. `judge_result.json` is
+the evaluator output.
+
+## Dispatch adapter-specific evaluators
+
+Wait for Prepare to finish. Assign every `status = ready` item to exactly one
+fresh Judge worker, up to available concurrency. Never give one worker multiple
+tasks and never spawn a worker for `resumed`.
+
+### File organization
+
+Use the deterministic evaluator against the prepared snapshot:
 
 ```powershell
 & <python> -B "<skill_root>\scripts\judge_file_organization.py" `
-  --metadata "<test_file_base>\<case_id>\metadata.json" `
-  --outputs "<case_run_dir>\outputs" `
-  --result "<judge_batch_dir>\<case_id>\judge_result.json"
+  --metadata "<judge_dir>\metadata.json" `
+  --outputs "<judge_dir>\output" `
+  --case-manifest "<judge_dir>\case_manifest.json" `
+  --result "<judge_dir>\judge_result.json"
 ```
 
-The evaluator must:
+Treat metadata rubrics as the complete final-state contract. Require exact
+`Desktop`, `Download`, and `Documents` roots; ignore only
+`outputs_manifest.json` bookkeeping; reject path traversal; compare direct
+children exactly; verify file/directory types and MD5 values; and continue after
+an unsupported individual rubric by marking that rubric failed. The evaluator
+must copy the Prepare fingerprint and must not create or change metadata or the
+case manifest.
 
-- require all three output roots and preserve exact case-sensitive names;
-- ignore `outputs_manifest.json` as Runner bookkeeping;
-- normalize `\` and `/` in rubric paths without allowing path traversal;
-- compare direct-child sets exactly, including unexpected entries;
-- verify requested file/directory types and MD5 values;
-- fail safely with `status = "error"` for an unsupported rubric or incomplete
-  outputs snapshot;
-- fingerprint `metadata.json` and the three output trees so a stale result is
-  never resumed after inputs change.
+### WorkspaceBench
 
-Judge only the latest clean `outputs/` mirror. Score the artifact exactly as it
-exists; do not guess a different remote state from timestamps or Trace. The
-Runner owns clean per-round replacement before this batch phase begins.
+Give the worker only its task ID, prepared directory, result path, and this
+Skill. Require it to inspect metadata, manifest, all relevant `data/`, `output/`,
+and `runner/` evidence. Use artifact-specific skills for documents,
+spreadsheets, PDFs, slides, or images. Evaluate each rubric independently in
+metadata order; insufficient evidence fails the rubric. Write only the assigned
+result with `judgeType = codex-subagent`.
 
-## WorkspaceBench adapter
+### Weekly report
 
-Use one isolated Judge subagent per prepared numeric Task. A calling run Skill
-may prepare the evidence, but this Skill owns evaluation, result validation, and
-batch scoring.
+Use the same Agent-evaluator contract as WorkspaceBench, with these additional
+checks when required by rubrics: output format, exact reporting date range,
+person/department/job identity, source-supported facts, required sections,
+readability, and worklog presence. Verify time range against both generated
+report content and dated source evidence. Material facts outside the requested
+period fail the relevant rubric. Write only the assigned result with
+`judgeType = codex-subagent`.
 
-Wait for the complete Runner/prepare batch handoff before spawning any Judge.
-Queue every prepared Task needing evaluation, run up to the available subagent
-concurrency limit, and fill freed slots until the queue is empty. Record
-Runner/prepare failures in the batch summary without asking a Judge subagent to
-recreate their evidence.
+## Common result schema and validation
 
-Give each subagent only its Task ID, prepared directory, result path, and this
-contract:
-
-1. Judge exactly one Task and inspect no other Task result.
-2. Read `metadata.json`, `case_manifest.json`, `agent.json`, and
-   `normalized_runner_log.jsonl`; inspect every file in `output/` and relevant
-   source files in `data/`.
-3. Use artifact-specific skills for spreadsheets, documents, PDFs,
-   presentations, and images when available. Judge actual contents rather than
-   filenames or Trace claims alone.
-4. Evaluate every rubric independently in metadata order using concrete
-   evidence. Insufficient evidence means `passed = false`.
-5. Write only the assigned `judge_result.json`. Do not modify prepared evidence.
-
-Write the existing Agent Judge result shape:
+Every successful evaluator writes:
 
 ```json
 {
   "version": 1,
-  "taskId": "117",
+  "taskId": "21",
   "status": "success",
   "judgeType": "codex-subagent",
   "inputFingerprint": {"algorithm": "sha256", "value": "...", "fileCount": 3},
@@ -127,7 +144,7 @@ Write the existing Agent Judge result shape:
       "rubric": "rubric text",
       "passed": true,
       "confidence": 0.95,
-      "evidence": "specific artifact evidence"
+      "evidence": "specific frozen-artifact evidence"
     }
   ],
   "summary": {"total": 1, "passed": 1, "failed": 0},
@@ -137,25 +154,27 @@ Write the existing Agent Judge result shape:
 }
 ```
 
-Copy `inputFingerprint` exactly from `case_manifest.json`. Set score to passed
-rubrics divided by total rubrics and top-level `passed = true` only when every
-rubric passes. Write `status = "error"` with an error message on unrecoverable
-Judge failure.
+Use `deterministic-file-organization` only for the file adapter and
+`codex-subagent` for the other two. Copy `inputFingerprint` exactly from the
+manifest. For an unrecoverable evaluator failure, write the same common identity
+fields with `status = error` and a non-empty `error`.
 
-## Validate and summarize
+After each worker, validate the file rather than trusting its message:
 
-After every evaluation, reopen `judge_result.json` instead of trusting a process
-exit or subagent message. Verify:
+```powershell
+& <python> -B "<skill_root>\scripts\judge_batch.py" validate-result `
+  --prepared-dir "<judge_dir>"
+```
 
-- selector and dataset adapter;
-- input fingerprint;
-- rubric indexes and exact text in metadata order;
-- summary arithmetic, score, and top-level passed value.
+Fix only the assigned result and repeat until valid, or replace it with a valid
+error result. Then summarize once:
 
-For a batch, write `batch_summary.json` containing only the selected current
-artifacts. Use string IDs so numeric Tasks and FileOrganization cases share the
-same report contract. Return one concise row per selector with Judge status,
-score, passed rubrics, action (`judged` or `resumed`), and result path.
+```powershell
+& <python> -B "<skill_root>\scripts\judge_batch.py" summarize `
+  --judge-root "<judge_root>"
+```
 
-Successful Judge execution does not mean the task passed. Keep `status` and
-`passed` separate in every report.
+Return `judge_batch.json`, `judge_queue.json`, `batch_summary.json`, and each
+prepared/result path to `run-xiaoyi`. Treat `judge_queue.json` as the direct
+batch input for HALO. Successful Judge execution and rubric pass/fail are
+distinct states.
