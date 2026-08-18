@@ -52,6 +52,7 @@ def build_halo_prompt(
     judge_result: dict,
     surface_filenames: list[str],
     additional_request: str | None = None,
+    evidence_packet: bool = False,
 ) -> str:
     """Build the unified HALO prompt; task and judge context may be absent."""
     task_id = _resolve_task_id(task)
@@ -112,8 +113,17 @@ def build_halo_prompt(
         "are needed. Do not repeat equivalent facts or excerpts.",
         "Use report_summary.trace_ids as the report-level TRACE anchor. An individual error",
         "may be proved entirely by TASK, JUDGE, SOURCE_FILE, or OUTPUT_FILE evidence. When",
-        "using TRACE evidence, call agent_cli source-evidence for the referenced span,",
-        "then copy its zero-based span_index and decoded raw_log_excerpt unchanged.",
+        (
+            "using TRACE evidence, locate the referenced span in the supplied "
+            "raw_evidence_by_span packet,"
+            if evidence_packet
+            else "using TRACE evidence, call agent_cli source-evidence for the referenced span,"
+        ),
+        (
+            "then copy its zero-based span_index and raw_log_excerpt unchanged."
+            if evidence_packet
+            else "then copy its zero-based span_index and decoded raw_log_excerpt unchanged."
+        ),
         "The excerpt must come from mapped pre-conversion source JSONL events, not",
         "converted span attributes. Every TRACE evidence item in an error finding must contain",
         "verbatim execution status or error output; an input/command-only excerpt is",
@@ -123,8 +133,16 @@ def build_halo_prompt(
         "Use at least 400 characters whenever the span contains that much source context,",
         "and include all available context when it is shorter; target 5-20 readable lines",
         "or 400-3,000 characters and never exceed 5,000. For oversized single-line",
-        "JSON, pass a specific failure regex to source-evidence --pattern and copy",
-        "its returned contiguous source window. Do not pad, splice fragments,",
+        (
+            "JSON, use the pre-extracted contiguous source window in raw_evidence_by_span."
+            if evidence_packet
+            else "JSON, pass a specific failure regex to source-evidence --pattern and copy"
+        ),
+        (
+            "Do not pad, splice fragments,"
+            if evidence_packet
+            else "its returned contiguous source window. Do not pad, splice fragments,"
+        ),
         "paraphrase, repeat an equivalent excerpt, or include unrelated noise.",
         "Do not duplicate the same failed calls in both a generic tool-failure error",
         "and a second semantic or validation error. Briefly summarize the dominant root",

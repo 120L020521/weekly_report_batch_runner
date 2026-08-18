@@ -1,426 +1,179 @@
 ---
 name: halo-rlm-agent-driven
 description: >-
-  Diagnose OTel/OpenTelemetry JSONL traces locally, with the host agent acting
-  as HALOAgent: no external LLM API or extra API key. Includes event-log
-  conversion, HALO-style trace tools, P0-P4 error ranking, path-efficiency
-  analysis, and UTF-8 JSON reports. Use for trace-only diagnosis, mixed trace
-  directories, tool/LLM/subagent failures, Better Harness or Workspace-Bench
-  failures, HarmonyOS XiaoYi FileOrganization_* file-organization failures,
-  weekly-report Runner failures, and harness optimization. Accepts an adapter
-  name to select the default editable-surface allowlist. Also accepts the
-  unified judge_queue.json, assigns one task per fresh diagnosis subagent, and
-  merges all reports into the fixed HTML format.
+  Diagnose OTel/OpenTelemetry JSONL traces locally with one deterministic
+  Python workflow and the host agent as the final reasoner. The script converts
+  traces, extracts error spans, repeated calls, terminal state and verbatim raw
+  evidence, validates reports, reuses reports by Trace/Judge/metadata
+  fingerprint, and renders batches. No external LLM API or extra API key.
+  Supports Workspace-Bench, HarmonyOS XiaoYi FileOrganization_* and weekly
+  report Runner-Judge-HALO flows.
 ---
 
 # halo-rlm-agent-driven
 
-Act as the HALO root and use only `agent_cli` and `tool_cli`. Never request an
-API key or invoke an external HALO/LLM engine; no model-engine CLI is bundled.
-Treat prepared spans as evidence. Task, Judge, rubric, and trace-summary files
-are optional evaluator context, never trace evidence or runner-visible input.
+Use `scripts/halo_workflow.py` as the only normal workflow entry. Python owns
+all mechanical work. The host Agent reads one generated input packet and owns
+only final attribution, recovery judgment, prioritization, and improvement
+recommendations. Never request an API key or invoke an external HALO/LLM
+engine.
 
-## Environment requirements
+## Requirements and boundaries
 
-- Use Python >= 3.10. The bundled workflow uses only the Python standard
-  library and requires no third-party package installation.
-- Read and write all JSONL, JSON, prompt, manifest, and report files as UTF-8.
-  On Windows, set `$env:PYTHONIOENCODING = "utf-8"` before running the Python
-  CLIs when the active shell does not already use UTF-8.
+- Use Python >= 3.10; no third-party package is required.
+- Read and write JSONL, JSON, prompt, manifest, and report files as UTF-8.
+- Treat Trace, metadata, Judge inputs, and unrelated files as read-only.
+- Write generated artifacts only below the supplied `OUTPUT_ROOT`.
+- Pass the exact Trace declared by the caller or Judge queue. Never replace it
+  with an ancestor directory and never scan for alternate inputs.
+- Task and Judge data are evaluator context, not Trace evidence and never
+  runner-visible input.
+- Do not use `--force` merely to rerun a diagnosis. It intentionally disables
+  report reuse and refreshes trace preparation.
 
-## Batch entry from run-xiaoyi
+## Single task
 
-For a full Runner-Judge-HALO flow, consume the unified Judge queue directly. Do
-not require or create `handoff.json`, and do not scan directories for Tasks.
-
-Read `judge_queue.json` once. Verify its version/producer and preserve Task order.
-For each row, use the declared `trace`, `metadata`, `preparedDir`, `result`,
-`adapter`, `runnerStatus`, `executionOutcome`, and `evidenceReady`; never search
-for alternatives. Prefer
-`<preparedDir>/metadata.json` when it exists. Use
-`<preparedDir>/judge_result.json` only when it exists and passed Judge
-validation. Missing Trace skips only that Task.
-
-Diagnose all Trace-bearing Tasks by default. When the user explicitly requests
-failed-only diagnosis, select Runner failures, missing/errored Judge results, and
-`passed = false` results.
-
-`executionOutcome` and `evidenceReady` are optional on legacy queues. Preserve
-them when present; they explain why a file-organization snapshot was Judgeable
-even when its dialogue outcome was unsuccessful. They do not replace Trace
-evidence and do not change the Trace-bearing eligibility rule.
-
-Assign each selected Task to one fresh diagnosis subagent. Run up to the
-available concurrency limit, refill freed slots, and continue after isolated
-failures. Give each subagent only that queue row, its resolved Task/Judge paths,
-its deterministic artifact directory (`task<ID>_halo` for numeric IDs, otherwise
-`<ID>_halo`), and this Skill. Each subagent must execute sections 1-4 below for
-its exact Trace, pass the adapter to prompt building and report validation, and
-write only inside that artifact directory.
-
-After all eligible subagents return, merge the reports:
+Run one command:
 
 ```powershell
-& <python> -B "<skill_root>\scripts\render_batch_report.py" `
-  --queue "<judge_root>\judge_queue.json" `
-  --output-root "<agent_workspace>\xiaoyi_halo" `
+& <python> -B "<skill_root>\scripts\halo_workflow.py" prepare `
+  --trace "<trace.jsonl>" `
+  --output-root "<output-root>" `
+  [--metadata "<metadata.json>"] `
+  [--judge "<judge_result.json>"] `
+  [--adapter file-organization|weekly-report|workspacebench] `
+  [--task-id "<task-id>"]
+```
+
+The JSON result has one of two successful states:
+
+- `resumed`: `agent_required=false`; return the existing validated
+  `report_path`. Do not invoke the Agent again.
+- `ready_for_agent`: give the Agent only the returned `agent_input` path.
+
+`prepare` performs all deterministic work in one process:
+
+- detects and converts raw `event + payload` JSONL or copies HALO span JSONL;
+- preserves multiple main/child traces and trace-local span indexes;
+- builds the authoritative v9 diagnosis contract and editable-target allowlist;
+- extracts per-trace root/terminal status;
+- extracts OTel errors, `tool.is_error`, and structured semantic failures;
+- normalizes tool arguments, groups exact repeated calls, records occurrence
+  counts and mechanically recognizable fail-then-success retries;
+- emits a compact complete tool timeline;
+- maps every root, error candidate, and repeated call back to a contiguous,
+  verbatim pre-conversion source excerpt;
+- writes `halo_agent_input.json`, `halo_prompt.txt`, the prepared Trace,
+  manifest, index cache when needed, and workflow state.
+
+The fingerprint includes the source Trace, Judge JSON, metadata JSON, adapter,
+editable surfaces, report contract, and deterministic implementation. A report
+is reused only when the fingerprint matches and complete bundle validation
+still succeeds. File existence alone is never sufficient.
+
+## Agent-only phase
+
+Open only `halo_agent_input.json`. Do not call `tool_cli`, `prepare_trace.py`,
+`agent_cli source-evidence`, or search the raw Trace during the normal path.
+The packet already contains:
+
+- `task_context` and `judge_context`;
+- `mechanical_evidence.overview` and per-trace summaries;
+- `terminal_status` with a non-authoritative mechanical classification hint;
+- `error_span_candidates`;
+- `repeated_calls`, tool counts, and the complete compact tool timeline;
+- `raw_evidence_by_span` with exact `trace_id`, `span_id`, zero-based
+  `span_index`, source line numbers, and verbatim `raw_log_excerpt`;
+- adapter-specific guidance, the authoritative diagnosis contract, allowed
+  targets, exact report path, and exact finalize command.
+
+The Agent must only:
+
+1. decide which mechanical candidates are material;
+2. attribute root cause without using Judge outcome as execution proof;
+3. decide whether a later compatible operation proves recovery;
+4. assign the final execution classification and P0-P4 priorities;
+5. propose surgical changes on allowed targets;
+6. write exactly one v9 JSON object to `agent_job.write`.
+
+Copy TRACE `span_index` and `raw_log_excerpt` unchanged from
+`raw_evidence_by_span`. Never invent or splice evidence. Non-TRACE evidence may
+use TASK, JUDGE, SOURCE_FILE, or OUTPUT_FILE as allowed by the embedded
+contract.
+
+Then run the packet's `agent_job.then_run`, equivalently:
+
+```powershell
+& <python> -B "<skill_root>\scripts\halo_workflow.py" finalize `
+  --agent-input "<artifact-dir>\halo_agent_input.json"
+```
+
+Fix only `halo_report.json` and rerun `finalize` until it returns
+`status=complete`. Finalization enforces schema, adapter targets, manifest
+bindings, freshness, real trace/span references, exact span indexes, verbatim
+source excerpts, outcome-bearing TRACE evidence, and report/state fingerprint
+binding.
+
+## Batch from Judge
+
+Consume the exact unified `judge_queue.json`; do not create `handoff.json` and
+do not scan task directories:
+
+```powershell
+& <python> -B "<skill_root>\scripts\halo_workflow.py" prepare-batch `
+  --queue "<judge-root>\judge_queue.json" `
+  --output-root "<agent-workspace>\xiaoyi_halo" `
   --mode all
 ```
 
-This writes `<output-root>/batch_diagnosis_report.html` using
-`assets/halo_diagnostic_report.template.html`. Preserve the template's
-collapsible left directory, fixed-width center, error→suggestion→evidence cards,
-and JSON-formatted raw excerpts. The center width must not change when the
-directory opens or closes. Keep the default 500-record archive limit unless the
-user explicitly changes it.
+Use `--mode failed` only when the user explicitly requests failed-only
+diagnosis. It selects Runner failures, missing/errored Judge results, and
+`passed=false`; `all` selects every Trace-bearing task. A missing Trace skips
+only that task.
 
-## 1. Prepare traces
+The result supplies `agent_inputs`. Process only entries whose task row has
+`agent_required=true`; a reused task needs no Agent work. For each ready input,
+perform the Agent-only phase above. Parallel Agent execution is optional and
+must follow the caller's concurrency policy; the deterministic Python work is
+already complete.
 
-Run once before diagnosis:
+After all ready reports are written, run:
 
-```bash
-python halo-rlm-agent-driven/scripts/prepare_trace.py INPUT --output-root OUTPUT_ROOT
+```powershell
+& <python> -B "<skill_root>\scripts\halo_workflow.py" finalize-batch `
+  --agent-queue "<output-root>\halo_agent_queue.json"
 ```
 
-`INPUT` may be one JSONL file or a directory. Directory names are opaque; do
-not infer roles from suffixes. The script:
+This validates every selected report and, only when validation succeeds,
+generates `batch_diagnosis_report.html` with the fixed template and archive
+policy. Isolated preparation errors remain recorded in the queue instead of
+changing other task inputs.
 
-- converts raw `event + payload` logs or copies HALO span JSONL;
-- recognizes both `agent_start`/`agent_end` and
-  `session_started`/`session_ended` lifecycle dialects;
-- partitions interleaved main/child events by `session_id`, then separates
-  repeated runs inside each session by lifecycle boundaries and `run_id`;
-- keeps auxiliary lifecycle events as source evidence without creating
-  metadata-only AGENT roots, and exposes `session.id`, `session.parent_id`, and
-  `agent.run_id` on AGENT spans when present;
-- treats raw `foo.jsonl` as authoritative over paired `foo.halo.jsonl`;
-- mirrors task paths into `OUTPUT_ROOT`, suffixing the task leaf with `_halo`;
-- maps a root `foo.jsonl` to `OUTPUT_ROOT/foo_halo/`;
-- creates the converted trace and `halo-prepared-manifest.json`, reserving exact
-  `prompt_path` and `report_path` locations without creating either file;
-- reuses current conversions, excludes generated outputs from scans, and never
-  overwrites source logs;
-- reports a collision instead of letting multiple logical traces overwrite one
-  task artifact directory.
+## Classification and report rules
 
-Treat the supplied source JSONL, its parent directory, Task/Judge inputs, and
-all unrelated files as read-only. When the caller or Judge queue supplies an
-exact JSONL path, pass that file directly; never replace it with an ancestor
-directory or recursively enumerate that directory. Recursive discovery is
-allowed only when the user explicitly selected a directory as `INPUT`.
+Choose exactly one execution classification:
 
-One raw JSONL may therefore produce multiple trace ids in one prepared HALO
-JSONL, for example one main AGENT trace plus one trace per embedded child run.
-Treat the manifest entry as a dataset path, not as proof that it contains only
-one execution. Discover its trace ids with `get_dataset_overview` and
-`query_traces`; never infer main/child count from input filenames.
-
-Example with explicitly supplied roots:
-
-```text
-INPUT_ROOT/task13/task13.jsonl -> OUTPUT_ROOT/task13_halo/
-INPUT_ROOT/foo.jsonl           -> OUTPUT_ROOT/foo_halo/
-```
-
-For a file, use only the returned `trace_path`. For a directory, stop when
-`errors` is non-empty; otherwise process each `prepared_traces` entry once and
-use its exact `selected`, `prompt_path`, `report_path`, and `manifest_path`.
-Never rescan or derive alternate converted paths. Use `--check` only for
-detection; `--output-root` selects artifacts, while `-o/--output` is invalid.
-
-Use the native host shell. On Windows use PowerShell paths, not WSL paths.
-Create no other files. Keep tool results in context; remove unavoidable OS-temp
-scratch files. Never delete or modify source JSONL, Task/Judge inputs, or
-unrelated files. Do not use `--force` merely to refresh a diagnosis. Generated
-HALO files may be created, reused, or refreshed only under `OUTPUT_ROOT`; an
-existing diagnosis report at the manifest's exact `report_path` may be
-overwritten by the new diagnosis without deleting it first.
-
-## 2. Build the prompt locally
-
-Before building anything, resolve the task context and resolve a Judge directory
-to exactly one JSON object. Pass the dataset adapter. HALO maps that adapter to
-the editable-target allowlist; the caller must not duplicate this policy.
-Surface names are only the allowlist for `proposed_changes[].target`; the helper
-does not read them as files or require a surfaces directory. Missing context
-must remain `MISSING`; never synthesize it.
-
-Then run exactly once for each prepared trace from
-`halo-rlm-agent-driven/scripts`:
-
-```bash
-python -m halo_rlm.agent_cli build-prompt --output PROMPT_PATH \
-  [--adapter ADAPTER] \
-  [--task-json TASK_JSON] [--judge-result JUDGE_JSON] \
-  [--surface EDITABLE_TARGET_NAME]... [-p "ADDITIONAL REQUEST"]
-```
-
-Use the manifest's exact `prompt_path`. `prepare_trace.py` does not create a
-default prompt; `build-prompt` creates or replaces the authoritative prompt only
-after all available Task, Judge, and surface inputs are final. Never call it with
-placeholder inputs, never hand-edit the generated file, and never rebuild it
-during diagnosis. A file's existence does not inject it automatically.
-
-Evaluator context may explain the target but cannot establish runner behavior
-without spans. Reopen `PROMPT_PATH` after the single build and use it unchanged as
-the diagnosis contract.
-
-The helper only reads JSON and writes text; it makes no model/API call.
-
-## 3. Diagnose with the host agent
-
-Use `--surface` only for an explicit one-off override. Otherwise HALO selects:
-
-- `file-organization`: `xiaoyi-auto-continue/SKILL.md`, `run_test.py`,
-  `task_executor.py`, and `setup_device.py`;
-- `weekly-report`: `xiaoyi-weekly-report/SKILL.md`, `weekly_runner.py`,
-  `task_executor.py`, and `batch_execute_tools.py`;
-- `workspacebench`, `workspace-bench`, unknown, or omitted: `runner_skill.md`
-  and `workspace_bench_tools.ts`.
-
-Pass the same adapter to prompt building and report validation. Physical files
-and a shared surfaces directory are not required. Do not propose rubric access,
-runner-core edits, or unlisted targets.
-
-Plan the investigation, delegate independent trace inspection when available,
-reconcile evidence, and write the report yourself. Give each subagent a
-self-contained question; it inherits no parent or sibling context. If
-delegation is unavailable, use a bounded single-agent fallback and state that
-recursion was not reproduced.
-
-### Inspect evidence
-
-Each investigator must:
-
-1. Call `get_dataset_overview` first, without regex.
-2. Use only trace/span ids returned by discovery or search.
-3. Prefer indexed filters; narrow regex when `has_more=true`.
-4. Treat a trace as small only when both `span_count <= 40` and
-   `raw_jsonl_bytes <= 40_000`. Only then use `view_trace`. If either value is
-   larger, use `search_trace`, then `view_spans` or `search_span`. Never retry
-   an oversized full view.
-5. Check OTel errors plus semantic markers such as `success=false`, timeout,
-   validation, rate limits, max turns/steps, and budget exhaustion.
-6. Cite trace/span ids, operations, arguments, results/errors, timestamps, and
-   repeated counts. Never fabricate evidence or recovery.
-7. Diagnose path efficiency: repeated/similar calls, no-information-gain work,
-   direction changes, ineffective retries, late stopping, and safe early
-   termination. Distinguish necessary verification from redundancy.
-
-Tool CLI grammar (local and API-free):
-
-```bash
-python -m halo_rlm.tool_cli TRACE TOOL [NAMED_TOOL_FLAGS]
-python -m halo_rlm.tool_cli TRACE get_dataset_overview
-python -m halo_rlm.tool_cli TRACE view_trace --trace-id TRACE_ID
-python -m halo_rlm.tool_cli TRACE view_spans --trace-id TRACE_ID --span-id SPAN_ID
-python -m halo_rlm.tool_cli TRACE --list
-python -m halo_rlm.agent_cli source-evidence --manifest MANIFEST_PATH \
-  --trace-id TRACE_ID --span-id SPAN_ID [--pattern DECISIVE_REGEX]
-```
-
-Use named flags for ordinary arguments. Use `--args` only for one non-empty
-JSON object containing structured filters; never combine it with named flags.
-Read tool data from the top-level `result` field.
-
-After choosing every TRACE evidence span, call `source-evidence` once for that
-span. Copy its `span_index` and decoded `raw_log_excerpt` values unchanged into
-the report. The helper maps the prepared span back to the pre-conversion source
-JSONL events, reports their source line numbers, and centers oversized excerpts
-on `--pattern` when supplied. Do not substitute converted span attributes for
-the returned source excerpt.
-
-Read `references/trace-format.md` only for span shape/truncation and
-`references/architecture.md` only for recursion, compaction, or termination.
-For a `FileOrganization_*` task, also read
-`references/file-organization-diagnosis.md` before classifying findings or
-proposing changes. Use that reference to distinguish conversation-control,
-shell-compatibility, filesystem-mutation, verification, and output-snapshot
-failures without treating Judge evidence as Trace evidence.
-
-## 4. Classify, write, and validate
-
-Identify the root AGENT span first. Classify exactly one:
-
-- `FAILED`: root error or explicit terminal failure.
+- `FAILED`: a root error or explicit terminal failure.
 - `SUCCEEDED_WITH_RECOVERED_ERRORS`: root success and every material error has
-  later recovery for the same operation with compatible arguments.
-- `SUCCEEDED_WITH_UNPROVEN_RECOVERY`: root success but material recovery is
+  a later success/verification for the same operation with compatible args.
+- `SUCCEEDED_WITH_UNPROVEN_RECOVERY`: root success but a material recovery is
   bypassed, tolerated, or unproven.
 - `SUCCEEDED_CLEANLY`: root success without material failures.
 - `UNKNOWN`: terminal evidence is missing, ambiguous, or conflicting.
 
 Root success proves execution completion, not external correctness. An
-unrelated OK span never proves recovery.
+unrelated OK Span never proves recovery. Exact report fields, evidence limits,
+Chinese narrative requirements, P0-P4 policy, allowed components, and
+classification-dependent proposed-change counts are authoritative in the
+packet's `diagnosis_contract`; do not duplicate or weaken them here.
 
-Return one UTF-8 JSON object with schema version 9 and these fields:
+Default editable targets are selected mechanically:
 
-```text
-report_summary
-  task_id
-  task
-  trace_ids[]
-  expected_output_files[]
-  judge_summary
-diagnosis
-  execution_classification
-  primary_failure_mode
-  error_findings[]
-    error_id
-    priority
-    category
-    title
-    occurrence_count
-    summary
-    evidence[]
-      source
-      reference
-      span_index
-      tool
-      fact
-      raw_log_excerpt
-    root_cause
-    recovery_status
-    impact
-proposed_changes[]
-  priority
-  component
-  target
-  title
-  error_refs[]
-  problem
-  implementation
-  acceptance_criteria[]
-  expected_impact
-```
+- `file-organization`: `xiaoyi-auto-continue/SKILL.md`, `run_test.py`,
+  `task_executor.py`, `setup_device.py`;
+- `weekly-report`: `xiaoyi-weekly-report/SKILL.md`, `weekly_runner.py`,
+  `task_executor.py`, `batch_execute_tools.py`;
+- other/unknown: `runner_skill.md`, `workspace_bench_tools.ts`.
 
-Copy the resolved `task_id` and `task` unchanged from prompt Context, including its explicit
-`MISSING` value when unavailable. Copy `expected_output_files` unchanged when
-supplied and omit it when missing. Include `judge_summary` only when Judge
-context exists.
-
-Use the exact v9 fields emitted by the generated prompt; do not add ad-hoc
-fields. Group each distinct material problem into one `error_findings` item. Do not
-repeat the same failed spans in a generic tool-failure error and another
-semantic or validation error. Write `primary_failure_mode` as a brief Chinese
-summary of the dominant root cause rather than an id.
-
-Use `source` values `TRACE`, `TASK`, `JUDGE`, `SOURCE_FILE`, or `OUTPUT_FILE`.
-For `TRACE`, put the real span id in `reference`; for every other source, use the
-rubric reference, path, filename, or source location needed to verify the fact.
-For TRACE evidence, copy the zero-based trace-local `span_index` returned by
-`source-evidence`; for non-TRACE evidence use `null`.
-Keep evidence focused: `fact` states what the source proves. Build the shortest
-complete evidence chain for each finding, normally 1-3 evidence items and never
-more than 5. Order separate items as triggering input/operation, decisive failure,
-then recovery or impact; omit equivalent or repeated evidence. Treat
-`report_summary.trace_ids` as
-the report-level TRACE anchor. An individual error may be proved entirely by
-`TASK`, `JUDGE`, `SOURCE_FILE`, or `OUTPUT_FILE` evidence; do not attach an
-irrelevant TRACE merely to satisfy that error. When an error uses `TRACE`
-evidence, its `raw_log_excerpt` must be one contiguous verbatim window copied from
-the pre-conversion source JSONL events mapped to the referenced Span. Every TRACE evidence item in an error finding must contain
-verbatim execution status or error output; an input/command-only excerpt is
-invalid. Include the triggering command/input, decisive output, failure status
-or exception, and immediate recovery/impact when they coexist in that Span.
-Prefer the complete relevant input/output/status payload when it fits.
-Use at least 400 characters whenever the mapped pre-conversion source events
-contain that much context, and include all available context when shorter. Target 5-20 readable
-lines or 400-3,000 characters and never exceed 5,000. For oversized single-line
-JSON, pass the decisive failure regex to `source-evidence --pattern`, then copy
-its returned contiguous source window. Do not pad, splice fragments,
-or repeat equivalent excerpts. Omit unrelated noise; preserve punctuation,
-identifiers, and line breaks, and do not translate or paraphrase it.
-Use `null` for `span_index` and an empty string for `raw_log_excerpt` on
-non-TRACE evidence. Evidence has no id and no priority.
-
-Write human-facing error and change values in Simplified Chinese. This includes
-`primary_failure_mode`, error titles, summaries, facts, root causes and impacts, plus change titles,
-problems, implementations, acceptance criteria, and expected impacts. Keep JSON
-field names, enums, P0-P4, task/trace/span ids, component/target values, tool
-names, paths, filenames, and raw errors unchanged. Use concise
-`UPPER_SNAKE_CASE` error categories and exactly one recovery status:
-`RECOVERED`, `UNRECOVERED`, `UNPROVEN`, or `NOT_APPLICABLE`.
-
-Rank errors and changes with the following fixed policy:
-
-- `P0`: directly causes a missing or materially wrong core output, or can make
-  the system falsely accept a failed task as successful.
-- `P1`: blocks reliable execution, recovery, or validation; violates an
-  important required constraint; or creates a major correctness risk without
-  being the dominant core-output failure.
-- `P2`: materially wastes calls, retries, time, or context, or creates a
-  recurring stability problem while preserving the result.
-- `P3`: limited robustness or maintainability issue with low current impact.
-- `P4`: optional polish or low-benefit improvement.
-
-Choose priority from trace-supported impact and urgency, not category names or
-tool error counts. Rank the dominant root cause above secondary symptoms. For
-example, wrong source columns that corrupt the main data are `P0`; a required
-chart-orientation mismatch or a broken output-verification script is normally
-`P1`; repeated unchanged reads are normally `P2`. Missing root terminal
-evidence is `P1`, but becomes `P0` when downstream automation uses it to decide
-success, retry, or billing. Every change must cite one or more existing
-`error_refs` and give concrete, verifiable `acceptance_criteria`. A change may
-combine multiple errors only when one implementation at one layer genuinely
-resolves all of them; otherwise split the changes. Never invent errors or
-changes to fill a priority.
-
-One error may be referenced by multiple proposed changes when they represent
-genuinely different modification directions. Use separate changes for
-independent layers or mutually exclusive alternatives, and state the applicable
-condition in `problem` or `implementation`. Do not assign unsupported numeric
-probabilities such as `50%`; prefer deterministic conditions. Avoid duplicate
-changes that differ only in wording.
-
-For `FAILED`, produce exactly 3-5 actionable changes. For every other execution
-classification, allow 0-5 and use an empty array when no trace-supported change
-is warranted. Each change uses one component: `tool_definition`, `tool_impl`,
-`new_tool`, `tool_merge`, `tool_split`, `middleware_in_tool`, or `prompt`.
-Target only an allowed surface. Prefer trace-proven tool changes. Include
-material, actionable efficiency findings and quantify expected
-call/retry/turn/time reduction when supported; never force a proposal without
-evidence.
-
-Return no banner, Markdown fence, or preamble. Write the JSON object to the
-manifest's exact `report_path`, replacing an older report at that path when
-present, then validate and normalize it locally:
-
-```bash
-python -m halo_rlm.agent_cli validate-report REPORT_PATH \
-  --manifest MANIFEST_PATH \
-  [--adapter ADAPTER] \
-  [--surface EDITABLE_FILE]...
-```
-
-Use the manifest's exact `manifest_path`; do not derive another one. Fix the
-report and rerun validation until it exits zero and returns
-`"validation": "complete"`. This single HALO-owned acceptance step enforces:
-
-- schema version 9, exact fields, types, nesting, enums, Chinese narratives,
-  error/reference integrity, allowed component/target values, and
-  classification-dependent change counts;
-- one error-free prepared-trace manifest whose source, selected trace, prompt,
-  report, and manifest paths exist and bind to the current artifact directory;
-- a prepared trace that is not older than its source and a report that is not
-  older than the authoritative prompt;
-- report trace ids and every `TRACE` evidence reference that actually exist in
-  the prepared trace; every TRACE `span_index` must equal the referenced span's
-  zero-based trace-local index; every `raw_log_excerpt` must occur verbatim in
-  the mapped pre-conversion source JSONL events; every TRACE excerpt in an error
-  finding must cover verbatim execution status or error output, so
-  input/command-only excerpts are rejected;
-  sufficiently large mapped source-event windows require at least 400 characters of
-  contiguous excerpt context; excerpt and evidence-count limits must be
-  respected; all proposed changes
-  must reference report error findings.
-
-Omitting `--manifest` performs schema-only compatibility validation and is not
-sufficient to finish a HALO diagnosis. The complete validator makes no
-model/API call.
-
-Keep index sidecars in place and reuse them. They are fingerprint-checked query
-caches under the HALO output tree; the trace tools rebuild stale caches
-automatically and may atomically refresh a stale sidecar. Never enumerate
-directories to find them, delete them before or after diagnosis, or issue
-per-sidecar cleanup commands.
+Legacy helper CLIs remain internal for tests and exceptional debugging. They
+are not part of the normal Agent workflow.

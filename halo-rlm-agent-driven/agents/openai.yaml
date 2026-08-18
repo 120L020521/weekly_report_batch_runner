@@ -1,4 +1,4 @@
 interface:
   display_name: "HALO Trace Diagnosis"
-  short_description: "Diagnose trace batches and merge HALO HTML"
-  default_prompt: "Use $halo-rlm-agent-driven to diagnose this trace or Judge queue locally and produce validated HALO reports."
+  short_description: "Precompute evidence and diagnose HALO traces"
+  default_prompt: "Use $halo-rlm-agent-driven to mechanically prepare this Trace or Judge queue, reuse valid reports by fingerprint, and leave only final attribution and recommendations to the Agent."

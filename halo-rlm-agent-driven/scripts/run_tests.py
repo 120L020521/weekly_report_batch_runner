@@ -469,6 +469,146 @@ def test_prepare_trace_layout() -> None:
     check(rejected.returncode == 2, "ambiguous --output option is rejected")
 
 
+def test_halo_workflow() -> None:
+    section("single mechanical HALO workflow")
+    root = TMP / "halo-workflow"
+    root.mkdir()
+    source = root / "task-workflow.jsonl"
+    metadata = root / "metadata.json"
+    judge = root / "judge.json"
+    output_root = root / "output"
+    rows = [
+        event("2026-08-18T10:00:00+08:00", "agent_start", "session-1", {"run_id": "trace-workflow"}),
+        event("2026-08-18T10:00:01+08:00", "tool_call", "session-1", {"tool_call_id": "call-1", "tool_name": "bash", "args": {"command": "do-work"}}),
+        event("2026-08-18T10:00:02+08:00", "tool_result", "session-1", {"tool_call_id": "call-1", "tool_name": "bash", "is_error": True, "content": [{"type": "text", "text": "failed once"}]}),
+        event("2026-08-18T10:00:03+08:00", "tool_call", "session-1", {"tool_call_id": "call-2", "tool_name": "bash", "args": {"command": "do-work"}}),
+        event("2026-08-18T10:00:04+08:00", "tool_result", "session-1", {"tool_call_id": "call-2", "tool_name": "bash", "is_error": False, "content": [{"type": "text", "text": "success"}]}),
+        event("2026-08-18T10:00:05+08:00", "agent_end", "session-1", {"run_id": "trace-workflow", "status": "completed"}),
+    ]
+    write_jsonl(source, rows)
+    write_json(metadata, {"task_id": "task-workflow", "task": "生成测试输出。"})
+    write_json(judge, {"status": "success", "passed": True, "score": 1})
+    command = [
+        HERE / "halo_workflow.py", "prepare",
+        "--trace", source,
+        "--output-root", output_root,
+        "--metadata", metadata,
+        "--judge", judge,
+    ]
+    prepared = run_python(*command)
+    prepared_value = json.loads(prepared.stdout)
+    packet_path = Path(prepared_value["agent_input"])
+    packet = json.loads(packet_path.read_text(encoding="utf-8"))
+    mechanical = packet["mechanical_evidence"]
+    check(
+        prepared.returncode == 0
+        and mechanical["overview"]["error_candidate_count"] == 1
+        and mechanical["overview"]["repeated_signature_count"] == 1,
+        "prepare emits error and repeated-call evidence in one pass",
+    )
+    check(
+        mechanical["terminal_status"]["root_spans"][0]["status_code"] == "STATUS_CODE_OK"
+        and len(mechanical["raw_evidence_by_span"]) >= 3,
+        "prepare emits terminal status and verbatim source evidence",
+    )
+    report = build_report(
+        report_summary={
+            "task_id": "task-workflow",
+            "task": "生成测试输出。",
+            "trace_ids": [item["trace_id"] for item in mechanical["trace_summaries"]],
+            "judge_summary": "Judge passed.",
+        },
+        execution_classification="SUCCEEDED_CLEANLY",
+        primary_failure_mode="测试执行已经完成。",
+        error_findings=[],
+        proposed_changes=[],
+    )
+    write_json(Path(packet["paths"]["report"]), report)
+    finalized = run_python(
+        HERE / "halo_workflow.py", "finalize", "--agent-input", packet_path
+    )
+    check(
+        finalized.returncode == 0 and json.loads(finalized.stdout)["status"] == "complete",
+        "finalize performs complete bundle validation",
+    )
+    resumed = run_python(*command)
+    resumed_value = json.loads(resumed.stdout)
+    check(
+        resumed.returncode == 0
+        and resumed_value["status"] == "resumed"
+        and resumed_value["agent_required"] is False,
+        "matching Trace/Judge/metadata fingerprint reuses a valid report",
+    )
+    legacy_root = root / "legacy-output"
+    legacy_prepared = run_python(
+        HERE / "prepare_trace.py", source, "--output-root", legacy_root
+    )
+    legacy_paths = json.loads(legacy_prepared.stdout)
+    legacy_prompt = run_python(
+        "-m", "halo_rlm.agent_cli", "build-prompt",
+        "--output", legacy_paths["prompt_path"],
+        "--task-json", metadata,
+        "--judge-result", judge,
+        cwd=HERE,
+    )
+    check(
+        legacy_prepared.returncode == 0 and legacy_prompt.returncode == 0,
+        "legacy report fixture is prepared",
+    )
+    write_json(Path(legacy_paths["report_path"]), report)
+    adopted = run_python(
+        HERE / "halo_workflow.py", "prepare",
+        "--trace", source,
+        "--output-root", legacy_root,
+        "--metadata", metadata,
+        "--judge", judge,
+    )
+    adopted_value = json.loads(adopted.stdout)
+    check(
+        adopted.returncode == 0
+        and adopted_value["status"] == "resumed"
+        and adopted_value["agent_required"] is False,
+        "valid legacy report with identical prompt is safely fingerprinted and reused",
+    )
+    judge_queue = root / "judge_queue.json"
+    write_json(judge_queue, {
+        "version": 1,
+        "producer": "judge-xiaoyi-results",
+        "tasks": [{
+            "taskId": "task-workflow",
+            "trace": str(source),
+            "metadata": str(metadata),
+            "preparedDir": str(root),
+            "result": str(judge),
+            "adapter": "workspacebench",
+            "runnerStatus": "completed",
+        }],
+    })
+    batch = run_python(
+        HERE / "halo_workflow.py", "prepare-batch",
+        "--queue", judge_queue,
+        "--output-root", output_root,
+    )
+    batch_value = json.loads(batch.stdout)
+    check(
+        batch.returncode == 0
+        and batch_value["reused_count"] == 1
+        and batch_value["ready_count"] == 0,
+        "batch preparation consumes Judge queue and reuses task report",
+    )
+    finished_batch = run_python(
+        HERE / "halo_workflow.py", "finalize-batch",
+        "--agent-queue", batch_value["agent_queue"],
+    )
+    finished_value = json.loads(finished_batch.stdout)
+    check(
+        finished_batch.returncode == 0
+        and finished_value["status"] == "complete"
+        and Path(finished_value["render"]["html_report"]).is_file(),
+        "batch finalization validates reports and renders HTML",
+    )
+
+
 def main() -> int:
     test_trace_store()
     test_report_contract()
@@ -476,6 +616,7 @@ def main() -> int:
     test_tool_cli()
     test_converter()
     test_prepare_trace_layout()
+    test_halo_workflow()
     print(f"\nALL {PASSED} CHECKS PASSED")
     return 0
 
