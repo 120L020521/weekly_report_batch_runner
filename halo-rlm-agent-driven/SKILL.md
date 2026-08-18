@@ -63,6 +63,8 @@ The JSON result has one of two successful states:
 - emits a compact complete tool timeline;
 - maps every root, error candidate, and repeated call back to a contiguous,
   verbatim pre-conversion source excerpt;
+- records an explicit evidence gap instead of aborting the whole task when an
+  anomalous Span has no pre-conversion source mapping;
 - writes `halo_agent_input.json`, `halo_prompt.txt`, the prepared Trace,
   manifest, index cache when needed, and workflow state.
 

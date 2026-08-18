@@ -37,6 +37,10 @@ EXECUTION_EVENTS = {
 
 START_EVENTS = {"agent_start", "session_started"}
 END_EVENTS = {"agent_end", "session_ended"}
+# Results may arrive after the lifecycle end event because transport and trace
+# export are asynchronous. Without a new start/run id they complete the closed
+# run; they are not evidence of a new execution.
+LATE_COMPLETION_EVENTS = {"model_output", "tool_result"}
 
 
 def _row_run_id(row: Json) -> str | None:
@@ -212,9 +216,9 @@ def _split_session_runs(rows: list[Json]) -> list[list[Json]]:
             has_execution
             and is_execution
             and (
-                closed
-                or event in START_EVENTS
+                event in START_EVENTS
                 or (run_id and current_run_id and run_id != current_run_id)
+                or (closed and event not in LATE_COMPLETION_EVENTS)
             )
         )
         if boundary:
@@ -273,6 +277,7 @@ def _convert_run(
     pending_models: list[Json] = []
     pending_tools: list[Json] = []
     source_events: list[Json] = []
+    terminal_seen = False
     agent_attrs = {
         **base_attrs(project_id, "AGENT"),
         "agent.name": agent_role,
@@ -311,6 +316,8 @@ def _convert_run(
         payload = row["payload"]
         if event not in {"model_input", "model_output", "tool_call", "tool_result"}:
             source_events.append(row)
+        if event in END_EVENTS:
+            terminal_seen = True
         if event == "model_input":
             pending_models.append(
                 {
@@ -322,6 +329,11 @@ def _convert_run(
         elif event == "model_output":
             value = correlation_id(payload)
             pending_model = _pop_correlated(pending_models, value)
+            if terminal_seen and pending_model is None:
+                # A late duplicate/foreign completion belongs to the closed
+                # run as source evidence but must not create an orphan LLM span.
+                source_events.append(row)
+                continue
             if value and pending_model is None:
                 warnings.warn(
                     f"model_output correlation id {value!r} has no matching model_input",
@@ -349,6 +361,11 @@ def _convert_run(
         elif event == "tool_result":
             result_call_id = tool_call_id(payload)
             call = _pop_tool_call(pending_tools, result_call_id)
+            if terminal_seen and call is None:
+                # A result can be exported after agent_end. If its call was
+                # already resolved (or is absent), retain it as evidence only.
+                source_events.append(row)
+                continue
             effective_call_id = (
                 result_call_id
                 or (call.get("call_id") if call else None)

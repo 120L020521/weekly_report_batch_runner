@@ -242,9 +242,24 @@ def _mechanical_evidence(source_path: Path, trace_path: Path) -> dict[str, Any]:
         for record in roots + candidates
     } | repeated_source_keys
     raw_evidence: list[dict[str, Any]] = []
+    raw_evidence_gaps: list[dict[str, Any]] = []
     for key in sorted(raw_keys, key=lambda item: (item[0], evidence_map[item].span_index if item in evidence_map else 10**9)):
         mapped = evidence_map.get(key)
         if mapped is None:
+            raw_evidence_gaps.append({
+                "trace_id": key[0],
+                "span_id": key[1],
+                "span_index": None,
+                "reason": "prepared span has no source-evidence mapping",
+            })
+            continue
+        if not mapped.candidates:
+            raw_evidence_gaps.append({
+                "trace_id": mapped.trace_id,
+                "span_id": mapped.span_id,
+                "span_index": mapped.span_index,
+                "reason": "no pre-conversion source events map to this span",
+            })
             continue
         excerpt = choose_source_excerpt(mapped, max_chars=RAW_LOG_EXCERPT_MAX_CHARS)
         raw_evidence.append({
@@ -285,6 +300,7 @@ def _mechanical_evidence(source_path: Path, trace_path: Path) -> dict[str, Any]:
             "tool_call_count": len(tools),
             "error_candidate_count": len(candidates),
             "repeated_signature_count": len(repeated),
+            "raw_evidence_gap_count": len(raw_evidence_gaps),
             "skipped_jsonl_lines": skipped,
         },
         "trace_summaries": trace_summaries,
@@ -298,6 +314,7 @@ def _mechanical_evidence(source_path: Path, trace_path: Path) -> dict[str, Any]:
         "tool_call_counts": dict(sorted(Counter(item["tool"] for item in tools).items())),
         "tool_timeline": tools,
         "raw_evidence_by_span": raw_evidence,
+        "raw_evidence_gaps": raw_evidence_gaps,
     }
 
 
