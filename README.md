@@ -86,19 +86,21 @@ WorkspaceBench 指定任务：
 
 ```text
 <agent_workspace>/
-  xiaoyi_file_runs/   # 文件整理 Runner
-  xiaoyi_logs/        # 周报和 WorkspaceBench Runner 日志、输出
-  xiaoyi_judge/       # Judge 批次与结果
-  xiaoyi_halo/        # HALO 诊断结果和 HTML
+  <task_key>/
+    xiaoyi_file_runs/ # Runner 产物
+    xiaoyi_judge/     # Judge 产物
+    xiaoyi_halo/      # HALO 单任务产物
+  _xiaoyi_batches/
+    run_<YYYYMMDD>/   # 批次索引、队列、汇总与合并 HTML
 ```
 
 关键批次文件：
 
-- 周报 Runner：`xiaoyi_logs/weekly_runner_batch.json`
-- 统一 Judge 输入：`xiaoyi_judge/<run_id>/judge_batch.json`
-- Judge 后续队列：`xiaoyi_judge/<run_id>/judge_queue.json`
-- Judge 汇总：`xiaoyi_judge/<run_id>/batch_summary.json`
-- HALO 汇总：位于 `xiaoyi_halo/` 下的合并诊断 HTML
+- 周报 Runner：`_xiaoyi_batches/run_<YYYYMMDD>/weekly_runner_batch.json`
+- 统一 Judge 输入：`_xiaoyi_batches/run_<YYYYMMDD>/judge_batch.json`
+- Judge 后续队列：`_xiaoyi_batches/run_<YYYYMMDD>/judge_queue.json`
+- Judge 汇总：`_xiaoyi_batches/run_<YYYYMMDD>/batch_summary.json`
+- HALO 汇总：`_xiaoyi_batches/run_<YYYYMMDD>/batch_diagnosis_report.html`
 
 所有数据和运行产物都应位于外部 workspace，不要写入已安装的 Skill 目录。
 
@@ -111,4 +113,3 @@ WorkspaceBench 指定任务：
 - 只运行数字任务 Runner：`run-xiaoyi-loop`
 - 对现有统一批次评分：`judge-xiaoyi-results`
 - 对现有 Judge 队列或单条 JSONL Trace 诊断：`halo-rlm-agent-driven`
-

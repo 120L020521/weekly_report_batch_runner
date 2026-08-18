@@ -56,15 +56,18 @@ Resolve these paths before starting:
 - `test_file_base`: directory containing case folders such as
   `FileOrganization_0_001/`.
 - `prompts_dir`: directory containing `<case_id>.txt`.
-- `output_base`: an explicit user path, otherwise
-  `<agent_workspace>/xiaoyi_file_runs`.
+- `task_artifacts_root`: an explicit user path, otherwise `<agent_workspace>`.
+- `batch_dir`: `<agent_workspace>/_xiaoyi_batches/run_<YYYYMMDD>` unless the
+  user explicitly supplies another batch-index root.
 - `config_path`: `<skill_root>/config.json`, unless the user explicitly supplies
   another config.
 
-Explicit user paths always win. Pass `output_base` with `run_test.py
---output-base`; do not write runtime artifacts under `<skill_root>`, the dataset,
-or the project-configured `test_runs` default. Preserve other config fields and
-do not expose, print, or copy any configured credential.
+Explicit user paths always win. Pass `task_artifacts_root` with `run_test.py
+--task-artifacts-root`; do not write runtime artifacts under `<skill_root>`, the
+dataset, or the project-configured `test_runs` default. The legacy
+`--output-base` remains supported for explicit old-layout runs, but never pass it
+together with `--task-artifacts-root`. Preserve other config fields and do not
+expose, print, or copy any configured credential.
 
 For every selected case, require:
 
@@ -86,9 +89,11 @@ Keep at most one FileOrganization batch per calendar day. Never append an
 `HHMMSS`, numeric, random, or other uniqueness suffix:
 
 ```text
-<output_base> = <agent_workspace>/xiaoyi_file_runs
+<task_root> = <agent_workspace>/<case_id>
+<output_base> = <task_root>/xiaoyi_file_runs
 <run_dir> = <output_base>/run_<run_id>
 <case_dir> = <run_dir>/<case_id>
+<batch_dir> = <agent_workspace>/_xiaoyi_batches/run_<run_id>
 <content> = <case_dir>/<case_id>.content.txt
 <meta> = <case_dir>/<case_id>.meta.json
 ```
@@ -156,7 +161,7 @@ Run from `<skill_root>`:
   --clean `
   --config "<config_path>" `
   --date "<run_id>" `
-  --output-base "<output_base>"
+  --task-artifacts-root "<task_artifacts_root>"
 ```
 
 This round must perform cleanup and setup. Do not add `--skip-setup` for a fresh
@@ -268,7 +273,7 @@ and stop the case. Otherwise run exactly one continuation:
   --query "<affirmative_query>" `
   --config "<config_path>" `
   --date "<run_id>" `
-  --output-base "<output_base>"
+  --task-artifacts-root "<task_artifacts_root>"
 ```
 
 Do not clean or resend setup files during continue rounds. The runner snapshots all
@@ -342,21 +347,23 @@ Do not let one case's `content.txt`, `dialog_page_id`, prompt, or outputs influe
 another case. Do not use a historical case artifact as evidence for the current run.
 
 After the host queue is exhausted, return the ordered batch handoff containing
-`run_dir`, `test_file_base`, every selected case ID, execution outcome, metadata
-path, outputs path, Runner directory, raw Trace path, and evidence readiness. This
+`batch_dir`, `test_file_base`, every selected case ID, its Task-specific
+`run_dir`, execution outcome, metadata path, outputs path, Runner directory, raw
+Trace path, and evidence readiness. This
 is the only point at which a parent workflow may start `judge-xiaoyi-results` for
 the batch.
 
-Also write the same handoff to `<run_dir>/runner_batch.json` only after the last
-selected case becomes terminal. Use this stable contract so Judge does not depend
-on conversation memory:
+Also write the same handoff to `<batch_dir>/runner_batch.json` only after the last
+selected case becomes terminal. Each Case may have a different `run_dir`; record
+the Task-specific directory in every Case row. Use this stable contract so Judge
+does not depend on conversation memory:
 
 ```json
 {
   "version": 1,
   "adapter": "file-organization",
   "runId": "20260814",
-  "runDir": "<absolute_run_dir>",
+  "batchDir": "<absolute_batch_dir>",
   "testFileBase": "<absolute_test_file_base>",
   "runnerFinished": true,
   "cases": [

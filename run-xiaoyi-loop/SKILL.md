@@ -43,15 +43,16 @@ configuration and generated artifacts as the source of truth.
   Task paths `A\\task\\112` and `B\\filetask\\39`, then pass both in one Runner invocation.
   Never omit those IDs, run a partial/probe batch, or ask the user for selectors they already
   supplied.
-- Keep runtime artifacts in the Agent workspace by default: `<agent_workspace>/xiaoyi_logs`,
-  `<agent_workspace>/xiaoyi_judge`, and `<agent_workspace>/pipeline_state.json`. Never treat
-  `<skill_root>` as their default destination.
+- Keep Task artifacts in `<agent_workspace>/task<ID>/xiaoyi_file_runs/`. Keep
+  batch-only Runner state in
+  `<agent_workspace>/_xiaoyi_batches/run_<YYYYMMDD>/pipeline_state.json`. Never
+  create stage-first `<agent_workspace>/xiaoyi_logs` for a new run and never
+  treat `<skill_root>` as the default destination.
 - Treat `<skill_root>` as read-only. Never create `.venv`, `config/local.toml`, caches, logs, or
   other machine-local files inside the installed Skill.
-- Store prepared evidence and the Agent Judge result together under `<run_dir>/task<ID>/`.
-  Write the result as `<run_dir>/task<ID>/judge_result.json` and the current batch summary as
-  `<run_dir>/batch_summary.json`. Do not overwrite API-backed profile results under
-  `<run_dir>/results/<profile>/`.
+- The shared Judge stores prepared evidence and `judge_result.json` in
+  `<agent_workspace>/task<ID>/xiaoyi_judge/`; this Runner never creates Judge
+  directories.
 - Use scripts and templates from this Skill directory. Do not depend on a separate XiaoYi Loop
   repository; only configured task data, HDC, runtime directories, and artifact-inspection
   skills may live outside it.
@@ -135,7 +136,8 @@ subset.
   and `rubrics`; ask for data only if they require source files, otherwise continue.
 - For missing HDC, no/multiple devices, or an invalid target, stop runner work and show the
   relevant `device.hdc`/`device.target` setting plus the `hdc list targets` check.
-- Store every Runner outcome under `<logs_dir>/task<ID>/`. At timeout or another runtime failure,
+- Store every Runner outcome under
+  `<agent_workspace>/task<ID>/xiaoyi_file_runs/task<ID>/`. At timeout or another runtime failure,
   preserve any available raw Trace as `task<ID>.jsonl`, record the actual status in
   `task<ID>.meta.json`, and include the Task in Judge. If no Trace is collected, keep only failure
   metadata and mark it `runner failed / not judged`.
@@ -150,7 +152,10 @@ For a new run, invoke only the runner phase:
 
 ```powershell
 & <python> -B "<skill_root>\scripts\run_tasks.py" <task-selectors> `
-  --workspace "<agent_workspace>"
+  --workspace "<agent_workspace>" `
+  --task-artifacts-root "<agent_workspace>" `
+  --logs-dir "<batch_dir>" `
+  --state-file "<batch_dir>\pipeline_state.json"
 ```
 
 Omit `<task-selectors>` when the workspace contains exactly one Task. When the user supplied a
@@ -158,9 +163,9 @@ dataset directory, add `--task-dir "<user_dataset_path>"`; a single Task directo
 `metadata.json` may also be passed directly. Before HDC starts, verify the script prints the
 resolved `metadata.json` for every Task. The Runner reads `metadata.task`, sends it as the query,
 waits for completion, and pulls the JSONL log plus declared outputs. Unless explicitly
-overridden, `<logs_dir>` means `<agent_workspace>/xiaoyi_logs`, `<run_dir>` means
-`<agent_workspace>/xiaoyi_judge`, and `<state_file>` means
-`<agent_workspace>/pipeline_state.json` throughout this workflow. Add
+overridden, the task-centric launcher writes each Task below
+`<agent_workspace>/task<ID>/xiaoyi_file_runs/task<ID>/`; `<logs_dir>` is only a
+legacy fallback and `<state_file>` is batch-level. Add
 `--config "<custom_config_path>"` only for an explicit non-default config location.
 
 Treat XiaoYi execution as a long-running quiet process. The Runner checks `stop_reason`
@@ -228,11 +233,11 @@ Prepare must read rubrics from the resolved metadata, copy relevant `data/`,
 normalize the current Trace, and copy outputs. Each successful Task produces:
 
 ```text
-<run_dir>/task<ID>/metadata.json
-<run_dir>/task<ID>/case_manifest.json
-<run_dir>/task<ID>/agent.json
-<run_dir>/task<ID>/normalized_runner_log.jsonl
-<run_dir>/task<ID>/output/
+<agent_workspace>/task<ID>/xiaoyi_judge/metadata.json
+<agent_workspace>/task<ID>/xiaoyi_judge/case_manifest.json
+<agent_workspace>/task<ID>/xiaoyi_judge/agent.json
+<agent_workspace>/task<ID>/xiaoyi_judge/normalized_runner_log.jsonl
+<agent_workspace>/task<ID>/xiaoyi_judge/output/
 ```
 
 ## Delegate the Judge phase

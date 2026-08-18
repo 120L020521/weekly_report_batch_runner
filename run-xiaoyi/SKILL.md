@@ -42,14 +42,24 @@ Before dispatch, state the selected adapter and terminal stage in one sentence.
 
 ## Runtime artifacts
 
-Use the calling Agent workspace unless the user supplies another output root:
+Use the calling Agent workspace unless the user supplies another output root.
+Make the Task the primary browsing unit; do not create stage-first roots:
 
 ```text
-<agent_workspace>/xiaoyi_file_runs/   # file-organization Runner
-<agent_workspace>/xiaoyi_logs/        # weekly/workspace Runner evidence
-<agent_workspace>/xiaoyi_judge/       # unified Judge input/output
-<agent_workspace>/xiaoyi_halo/        # diagnosis and HTML
+<agent_workspace>/
+├── <task_key>/
+│   ├── xiaoyi_file_runs/  # Runner-native artifacts
+│   ├── xiaoyi_judge/      # frozen evidence and judge_result.json
+│   └── xiaoyi_halo/       # per-Task HALO evidence and report
+└── _xiaoyi_batches/
+    └── run_<YYYYMMDD>/    # one batch index per day
 ```
+
+`<task_key>` is the full `FileOrganization_<n>_<n>` ID for file organization
+and `task<ID>` for numeric WorkspaceBench or weekly-report tasks. Batch-only
+indexes, queues, summaries, and merged HTML belong below `_xiaoyi_batches`; do
+not duplicate them into every Task directory. Existing explicit output paths
+remain valid for backward compatibility, but new runs use this layout.
 
 Do not write runtime artifacts inside an installed Skill or source dataset.
 
@@ -58,12 +68,19 @@ Do not write runtime artifacts inside an installed Skill or source dataset.
 Read the selected Runner Skill completely and obey it. Pass only selected IDs,
 dataset paths, configuration, and the Agent workspace.
 
-- File organization: run the complete serial 1+3 confirmation lifecycle and
-  receive `runner_batch.json`.
-- Weekly report: run the one-device serial person/task lifecycle and receive
-  `weekly_runner_batch.json` with `runnerFinished = true`.
-- WorkspaceBench: start the selected batch once and receive its terminal Runner
-  handoff with exact metadata, data, output, Runner-log, and Trace paths.
+- File organization: run the complete serial 1+3 confirmation lifecycle. For
+  each Case, pass `<agent_workspace>` through `--task-artifacts-root`; the
+  launcher derives `<case_id>/xiaoyi_file_runs`. After the batch, write the
+  unified `runner_batch.json` under
+  `_xiaoyi_batches/run_<YYYYMMDD>/`.
+- Weekly report: preserve the one-device serial person/task lifecycle, but route
+  each Task's Runner output root to
+  `<agent_workspace>/task<ID>/xiaoyi_file_runs`; write the unified
+  `weekly_runner_batch.json` under the batch index directory.
+- WorkspaceBench: preserve serial execution and exact dataset bindings. Route
+  each Task's `--logs-dir` to
+  `<agent_workspace>/task<ID>/xiaoyi_file_runs`; record the terminal Runner
+  handoff under the batch index directory.
 
 For `RUNNER_ONLY`, return the Runner handoff and stop. Metadata rubrics never
 make a Runner-only task fail and never implicitly enable Judge.
@@ -72,7 +89,7 @@ make a Runner-only task fail and never implicitly enable Judge.
 
 For either Judge terminal stage, read `judge-xiaoyi-results/SKILL.md` completely.
 After every selected Runner item is terminal, write one UTF-8
-`<agent_workspace>/xiaoyi_judge/<run_id>/judge_batch.json`:
+`<agent_workspace>/_xiaoyi_batches/run_<YYYYMMDD>/judge_batch.json`:
 
 ```json
 {
@@ -80,7 +97,8 @@ After every selected Runner item is terminal, write one UTF-8
   "producer": "run-xiaoyi",
   "runner_finished": true,
   "run_id": "20260817",
-  "judge_root": "D:/workspace/xiaoyi_judge/20260817",
+  "artifact_root": "D:/workspace",
+  "judge_root": "D:/workspace/_xiaoyi_batches/run_20260817",
   "tasks": [
     {
       "task_id": "21",
@@ -90,10 +108,12 @@ After every selected Runner item is terminal, write one UTF-8
       "evidence_ready": true,
       "metadata": "D:/workspace/task/何沐/21/metadata.json",
       "data": "D:/workspace/task/何沐/data",
-      "outputs": "D:/workspace/xiaoyi_logs/task21/outputs",
-      "runner_dir": "D:/workspace/xiaoyi_logs/task21",
-      "trace": "D:/workspace/xiaoyi_logs/task21/task21.jsonl",
-      "judge_dir": "D:/workspace/xiaoyi_judge/20260817/task21"
+      "outputs": "D:/workspace/task21/xiaoyi_file_runs/task21/outputs",
+      "runner_dir": "D:/workspace/task21/xiaoyi_file_runs/task21",
+      "trace": "D:/workspace/task21/xiaoyi_file_runs/task21/task21.jsonl",
+      "task_root": "D:/workspace/task21",
+      "judge_dir": "D:/workspace/task21/xiaoyi_judge",
+      "halo_dir": "D:/workspace/task21/xiaoyi_halo"
     }
   ]
 }
@@ -104,7 +124,9 @@ Write every path field explicitly and absolutely; use `null` only for optional
 `execution_outcome` and whether frozen Judge inputs are complete as
 `evidence_ready`. Normalize Runner state to `completed`, `failed`, `timeout`,
 `unknown`, or `not-run`. Copy paths and state from the Runner handoff; never scan
-for substitutes. Keep every `judge_dir` unique and below `judge_root`.
+for substitutes. For the task-centric layout, keep every `task_root` unique and
+below `artifact_root`, require `judge_dir = <task_root>/xiaoyi_judge`, and require
+`halo_dir = <task_root>/xiaoyi_halo`. `judge_root` contains batch-only files.
 
 For file organization, map `complete` to `runner_status = completed`; map
 `incomplete-after-3-continues` and `execution-error` to `runner_status = failed`,
@@ -132,9 +154,10 @@ and batch summary, then stop.
 ## Continue directly into HALO
 
 For `RUNNER_JUDGE_DIAGNOSE`, read `halo-rlm-agent-driven/SKILL.md` completely
-after the Judge batch is terminal. Pass the exact `judge_queue.json` and
-`<agent_workspace>/xiaoyi_halo` output root to its batch-diagnosis workflow.
-Do not create a second handoff file.
+after the Judge batch is terminal. Pass the exact `judge_queue.json` and the
+current `_xiaoyi_batches/run_<YYYYMMDD>` directory as its batch output root.
+HALO must honor each queue row's `haloDir` for per-Task artifacts. Do not create
+a second handoff file.
 
 HALO reads the common Judge queue, assigns each Trace-bearing task to one fresh
 diagnosis subagent, preserves failure isolation, and merges valid per-task

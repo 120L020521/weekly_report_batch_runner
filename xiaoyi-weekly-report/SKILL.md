@@ -35,7 +35,8 @@ Resolve `<data_root>` to a user-supplied directory containing:
 
 Do not require `xiaoyi_batch_runner/` or a project-level `scripts/` directory.
 All runtime scripts and default settings are inside this Skill. Keep
-`deliverables_final/`, `task/`, and generated `xiaoyi_logs/` outside the Skill.
+`deliverables_final/`, `task/`, and generated Task/batch artifact directories
+outside the Skill.
 
 Require every selected `metadata.json` to contain:
 
@@ -75,7 +76,8 @@ Desktop, Documents, and Download, then push that person's data. For each person:
    or force-stop XiaoYi between dialog rounds.
 5. Preserve the existing JSONL flow unchanged: snapshot the pre-Task log baseline,
    wait for a new `stop_reason=stop`, and pull the selected raw Trace to
-   `<output_root>/task<numeric_id>/task<numeric_id>.jsonl` after each round.
+   `<agent_workspace>/task<numeric_id>/xiaoyi_file_runs/task<numeric_id>/task<numeric_id>.jsonl`
+   after each round.
    Trace content no longer selects report/worklog paths.
 6. After the final dialog verdict, use only these HDC-visible paths:
 
@@ -86,7 +88,8 @@ Desktop, Documents, and Download, then push that person's data. For each person:
 
    Pull direct files from the first path as generated reports. Recursively pull
    concrete files from the second path as worklog. Preserve both beneath
-   `<output_root>/task<numeric_id>/outputs/XiaoYiWorkspace/`. Do not inspect or
+   `<agent_workspace>/task<numeric_id>/xiaoyi_file_runs/task<numeric_id>/outputs/XiaoYiWorkspace/`.
+   Do not inspect or
    pull Desktop, Documents, Download, calendar, memo, source-data mirrors,
    log-declared artifact paths, or any other workspace directory.
 7. After the Task reaches a final dialog verdict and its Trace, report, and
@@ -139,6 +142,8 @@ Run a selected batch:
 ```powershell
 & <python> -B "<skill_root>\scripts\run_weekly.py" `
   --project-root "<data_root>" `
+  --output-root "<batch_dir>" `
+  --task-artifacts-root "<agent_workspace>" `
   --person "<person>" `
   --task "<numeric_id>"
 ```
@@ -152,7 +157,8 @@ Use separate data paths only when the directories do not share one root:
 & <python> -B "<skill_root>\scripts\run_weekly.py" `
   --metadata-root "<task_dir>" `
   --deliverables-root "<deliverables_dir>" `
-  --output-root "<logs_dir>" `
+  --output-root "<batch_dir>" `
+  --task-artifacts-root "<agent_workspace>" `
   --person "<person>" --task "<numeric_id>"
 ```
 
@@ -178,13 +184,13 @@ the handoff and state that downstream stages require `run-xiaoyi`.
 After a normal batch, require:
 
 ```text
-<output_root>/weekly_runner_batch.json
+<batch_dir>/weekly_runner_batch.json
 ```
 
 Store each Task's Runner evidence in one prefixed directory:
 
 ```text
-<output_root>/task<numeric_id>/
+<agent_workspace>/task<numeric_id>/xiaoyi_file_runs/task<numeric_id>/
 ├── task<numeric_id>.jsonl
 ├── task<numeric_id>.meta.json
 ├── task<numeric_id>.prompt.txt
@@ -199,7 +205,8 @@ Store each Task's Runner evidence in one prefixed directory:
 Do not create `.run`, `_runs`, `run_<date>`, lifecycle, or person-result files.
 Do not create batch-level lifecycle or HDC command logs. Stream helper-process and
 HDC diagnostics to the invoking console only. The only batch-level file created by
-Runner is `weekly_runner_batch.json`; per-Task evidence remains under `task<ID>/`.
+Runner is `<batch_dir>/weekly_runner_batch.json`; per-Task evidence remains below
+each Task's `xiaoyi_file_runs/`.
 
 For every selected Task, require the handoff entry to include these exact Judge
 inputs after artifact collection has completed:
@@ -207,8 +214,8 @@ inputs after artifact collection has completed:
 ```text
 judgeInputs.metadata      = <metadata_root>/<person>/<ID>/metadata.json
 judgeInputs.data          = null
-judgeInputs.outputs       = <output_root>/task<ID>/outputs
-judgeInputs.runnerTaskDir = <output_root>/task<ID>
+judgeInputs.outputs       = <agent_workspace>/task<ID>/xiaoyi_file_runs/task<ID>/outputs
+judgeInputs.runnerTaskDir = <agent_workspace>/task<ID>/xiaoyi_file_runs/task<ID>
 ```
 
 Write `runnerFinished = true` only after every selected person's Tasks and
@@ -225,5 +232,5 @@ when the required Runner evidence was collected successfully.
 
 Treat `weekly_runner_batch.json` as the only downstream interface. A Judge or
 HALO coordinator must consume the exact paths recorded there; it must not rediscover
-Tasks by scanning `xiaoyi_logs`, rerun XiaoYi, or infer one person's evidence from
+Tasks by scanning old Runner roots, rerun XiaoYi, or infer one person's evidence from
 another person's directory.

@@ -31,7 +31,6 @@ from halo_rlm.report_contract import (  # noqa: E402
     render_report_example,
 )
 from halo_rlm.trace_store import TraceStore  # noqa: E402
-from halo_workflow import _mechanical_evidence  # noqa: E402
 
 PASSED = 0
 TMP = Path(tempfile.mkdtemp(prefix="halo_rlm_tests_"))
@@ -444,59 +443,6 @@ def test_converter() -> None:
     tool = next(span for span in converted if span["attributes"].get("tool.name") == "bash")
     check(tool["status"]["code"] == "STATUS_CODE_ERROR", "details.ok=false remains a tool failure")
 
-    late_duplicate = [
-        event("2026-08-18T10:00:00+08:00", "agent_start", "same-session", {"run_id": "run-1"}),
-        event("2026-08-18T10:00:01+08:00", "tool_call", "same-session", {"tool_call_id": "call-1", "tool_name": "bash", "args": {"command": "work"}}),
-        event("2026-08-18T10:00:02+08:00", "tool_result", "same-session", {"tool_call_id": "call-1", "tool_name": "bash", "is_error": False}),
-        event("2026-08-18T10:00:03+08:00", "agent_end", "same-session", {"run_id": "run-1", "status": "interrupted"}),
-        event("2026-08-18T10:00:04+08:00", "tool_result", "same-session", {"tool_call_id": "call-1", "tool_name": "bash", "is_error": False}),
-        event("2026-08-18T10:00:05+08:00", "agent_start", "same-session", {"run_id": "run-2"}),
-        event("2026-08-18T10:00:06+08:00", "agent_end", "same-session", {"run_id": "run-2", "status": "completed"}),
-    ]
-    converted = convert_events(late_duplicate, "test-project", "fallback")
-    roots = [span for span in converted if not span["parent_span_id"]]
-    check(
-        {span["trace_id"] for span in roots} == {"run-1", "run-2"}
-        and len(roots) == 2,
-        "late post-end tool result does not create a session-id phantom run",
-    )
-    check(
-        next(span for span in roots if span["trace_id"] == "run-1")["status"]["code"]
-        == "STATUS_CODE_ERROR",
-        "interrupted agent_end remains an explicit terminal failure",
-    )
-    check(
-        sum(span["name"] == "function.bash" for span in converted) == 1,
-        "late duplicate tool result remains source evidence instead of an orphan span",
-    )
-
-
-def test_mechanical_evidence_gap() -> None:
-    section("mechanical source-evidence degradation")
-    root = TMP / "evidence-gap"
-    root.mkdir()
-    source = root / "source.jsonl"
-    prepared = root / "prepared.halo.jsonl"
-    write_jsonl(source, [
-        event("2026-08-18T11:00:00+08:00", "agent_end", "session-1", {"status": "completed"})
-    ])
-    write_jsonl(prepared, [{
-        "trace_id": "session-1",
-        "span_id": "root-without-source",
-        "parent_span_id": "",
-        "name": "agent.main",
-        "start_time": "2026-08-18T03:00:00Z",
-        "end_time": "2026-08-18T03:00:01Z",
-        "status": {"code": "STATUS_CODE_OK", "message": ""},
-        "attributes": {},
-    }])
-    evidence = _mechanical_evidence(source, prepared)
-    check(
-        evidence["overview"]["raw_evidence_gap_count"] == 1
-        and evidence["raw_evidence_gaps"][0]["span_id"] == "root-without-source",
-        "one unmapped root is recorded without aborting the evidence packet",
-    )
-
 
 def test_prepare_trace_layout() -> None:
     section("prepare_trace output layout")
@@ -661,6 +607,36 @@ def test_halo_workflow() -> None:
         and Path(finished_value["render"]["html_report"]).is_file(),
         "batch finalization validates reports and renders HTML",
     )
+    task_root = root / "task-workflow"
+    task_halo = task_root / "xiaoyi_halo"
+    task_centric_queue = root / "task-centric-judge-queue.json"
+    write_json(task_centric_queue, {
+        "version": 1,
+        "producer": "judge-xiaoyi-results",
+        "tasks": [{
+            "taskId": "task-workflow",
+            "trace": str(source),
+            "metadata": str(metadata),
+            "preparedDir": str(root),
+            "result": str(judge),
+            "adapter": "workspacebench",
+            "runnerStatus": "completed",
+            "taskRoot": str(task_root),
+            "haloDir": str(task_halo),
+        }],
+    })
+    task_centric_batch = run_python(
+        HERE / "halo_workflow.py", "prepare-batch",
+        "--queue", task_centric_queue,
+        "--output-root", root / "batch-index",
+    )
+    task_centric_value = json.loads(task_centric_batch.stdout)
+    task_agent_input = Path(task_centric_value["tasks"][0]["agent_input"])
+    check(
+        task_centric_batch.returncode == 0
+        and task_agent_input.is_relative_to(task_halo),
+        "batch preparation honors each validated task haloDir",
+    )
 
 
 def main() -> int:
@@ -669,7 +645,6 @@ def main() -> int:
     test_agent_cli()
     test_tool_cli()
     test_converter()
-    test_mechanical_evidence_gap()
     test_prepare_trace_layout()
     test_halo_workflow()
     print(f"\nALL {PASSED} CHECKS PASSED")

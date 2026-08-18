@@ -116,6 +116,13 @@ def _build_parser(settings: LocalSettings) -> argparse.ArgumentParser:
         help="小艺轨迹与 output 输出目录，也是 judge prepare 的 --logs-dir。",
     )
     parser.add_argument(
+        "--task-artifacts-root",
+        help=(
+            "可选任务优先布局根目录；Runner 会把 Task <ID> 写到 "
+            "<root>/task<ID>/xiaoyi_file_runs/task<ID>/。仅用于 Runner-only。"
+        ),
+    )
+    parser.add_argument(
         "--run-dir",
         default=str(settings.run_dir),
         help="judge run 根目录，默认由本机配置决定。",
@@ -222,6 +229,14 @@ def _clean_task_log_dir(logs_dir: Path, task_id: int) -> None:
         shutil.rmtree(task_dir, ignore_errors=True)
 
 
+def _task_logs_dir(args: argparse.Namespace, logs_dir: Path, task_id: int) -> Path:
+    configured = getattr(args, "task_artifacts_root", None)
+    if not configured:
+        return logs_dir
+    root = Path(configured).expanduser().resolve()
+    return root / f"task{task_id}" / "xiaoyi_file_runs"
+
+
 def _record_state(
     state_path: Path,
     *,
@@ -294,12 +309,13 @@ def run_runner_phase(args: argparse.Namespace, tasks: list[TaskSpec], logs_dir: 
 
         for index, task in enumerate(tasks, start=1):
             task_id = task.task_id
+            task_logs_dir = _task_logs_dir(args, logs_dir, task_id)
             current_task = task_id
             current_task_started_at = None
             current_task_deadline_at = None
             record("runner-preparing")
             print(f"\n[runner] [{index}/{total}] 启动 task{task_id}")
-            _clean_task_log_dir(logs_dir, task_id)
+            _clean_task_log_dir(task_logs_dir, task_id)
 
             query_characters: int | None = None
             try:
@@ -343,13 +359,13 @@ def run_runner_phase(args: argparse.Namespace, tasks: list[TaskSpec], logs_dir: 
                     done_log,
                     task=task,
                     query_characters=query_characters,
-                    out_dir=logs_dir,
+                    out_dir=task_logs_dir,
                     target=args.target,
                     verbose=args.verbose,
                 )
                 print(
                     f"[runner] task{task_id} 日志与 output 已落盘到 "
-                    f"{logs_dir}/task{task_id}/"
+                    f"{task_logs_dir}/task{task_id}/"
                 )
 
                 if not args.no_force_stop:
@@ -375,7 +391,7 @@ def run_runner_phase(args: argparse.Namespace, tasks: list[TaskSpec], logs_dir: 
                     task,
                     query_characters,
                     exc,
-                    logs_dir,
+                    task_logs_dir,
                 )
                 if collected:
                     completed.append(task_id)
@@ -404,7 +420,7 @@ def run_runner_phase(args: argparse.Namespace, tasks: list[TaskSpec], logs_dir: 
                     task,
                     query_characters,
                     exc,
-                    logs_dir,
+                    task_logs_dir,
                 )
                 if collected:
                     completed.append(task_id)
@@ -763,6 +779,12 @@ def main(argv: Sequence[str] | None = None) -> int:
     logs_dir.mkdir(parents=True, exist_ok=True)
     run_dir = _resolve_run_dir(args.run_dir)
     run_dir.mkdir(parents=True, exist_ok=True)
+    if args.task_artifacts_root and not args.skip_judge:
+        print(
+            "参数错误：--task-artifacts-root 只用于 Runner-only；共享 Judge 请使用 run-xiaoyi 编排。",
+            file=sys.stderr,
+        )
+        return 2
 
     runner_completed: list[int] = []
     runner_failed: list[int] = []

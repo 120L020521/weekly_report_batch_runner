@@ -332,6 +332,35 @@ class WeeklyRunnerArtifactTests(unittest.TestCase):
                 json.loads(handoff_path.read_text(encoding="utf-8"))["runnerFinished"]
             )
 
+    def test_task_centric_handoff_uses_per_task_runner_root(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            task = self.make_task(root)
+            batch_root = root / "_xiaoyi_batches" / "run_20260818"
+            task_artifacts_root = root
+            runner_root = root / "task21" / "xiaoyi_file_runs"
+            task_dir = runner_root / "task21"
+            (task_dir / "outputs").mkdir(parents=True)
+            (task_dir / "task21.jsonl").write_text("{}\n", encoding="utf-8")
+            (task_dir / "completed.json").write_text("{}", encoding="utf-8")
+            config = {
+                "metadata_root": root / "task",
+                "deliverables_root": root / "deliverables_final",
+                "output_root": batch_root,
+                "task_artifacts_root": task_artifacts_root,
+            }
+
+            handoff_path = runner.write_weekly_runner_handoff(
+                [task], config, run_date="20260818", runner_finished=True
+            )
+            payload = json.loads(handoff_path.read_text(encoding="utf-8"))
+            entry = payload["tasks"][0]
+            self.assertEqual(handoff_path, batch_root / "weekly_runner_batch.json")
+            self.assertEqual(entry["judgeInputs"]["runnerTaskDir"], str(task_dir.resolve()))
+            self.assertEqual(entry["judgeInputs"]["outputs"], str((task_dir / "outputs").resolve()))
+            self.assertEqual(payload["roots"]["taskArtifacts"], str(root.resolve()))
+            self.assertTrue(payload["runnerFinished"])
+
 
 if __name__ == "__main__":
     unittest.main()

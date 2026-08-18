@@ -211,7 +211,12 @@ def _load_prepared(prepared_dir: Path) -> tuple[dict[str, Any], dict[str, Any]]:
     return metadata, manifest
 
 
-def _validate_entry_shape(entry: dict[str, Any], judge_root: Path) -> dict[str, Any]:
+def _validate_entry_shape(
+    entry: dict[str, Any],
+    judge_root: Path,
+    *,
+    artifact_root: Path | None = None,
+) -> dict[str, Any]:
     task_id = _task_id(entry.get("task_id"), "tasks[].task_id")
     adapter = entry.get("adapter")
     if adapter not in ADAPTERS:
@@ -238,12 +243,48 @@ def _validate_entry_shape(entry: dict[str, Any], judge_root: Path) -> dict[str, 
         raise JudgeBatchError(f"task {task_id} is missing explicit path keys: {', '.join(missing)}")
     judge_dir = _absolute_path(entry["judge_dir"], f"task {task_id} judge_dir")
     assert judge_dir is not None
-    try:
-        judge_dir.relative_to(judge_root)
-    except ValueError as exc:
-        raise JudgeBatchError(f"task {task_id} judge_dir must stay below judge_root") from exc
-    if judge_dir == judge_root:
-        raise JudgeBatchError(f"task {task_id} judge_dir must be below, not equal to, judge_root")
+    task_root = _absolute_path(
+        entry.get("task_root"), f"task {task_id} task_root", nullable=True
+    )
+    halo_dir = _absolute_path(
+        entry.get("halo_dir"), f"task {task_id} halo_dir", nullable=True
+    )
+    if artifact_root is None:
+        try:
+            judge_dir.relative_to(judge_root)
+        except ValueError as exc:
+            raise JudgeBatchError(f"task {task_id} judge_dir must stay below judge_root") from exc
+        if judge_dir == judge_root:
+            raise JudgeBatchError(f"task {task_id} judge_dir must be below, not equal to, judge_root")
+    else:
+        if task_root is None:
+            raise JudgeBatchError(
+                f"task {task_id} task_root is required when artifact_root is present"
+            )
+        try:
+            task_relative = task_root.relative_to(artifact_root)
+        except ValueError as exc:
+            raise JudgeBatchError(f"task {task_id} task_root must stay below artifact_root") from exc
+        if task_root == artifact_root:
+            raise JudgeBatchError(
+                f"task {task_id} task_root must be below, not equal to, artifact_root"
+            )
+        if task_relative.parts[0].casefold() == "_xiaoyi_batches":
+            raise JudgeBatchError(
+                f"task {task_id} task_root must not use the batch-index directory"
+            )
+        expected_judge_dir = (task_root / "xiaoyi_judge").resolve()
+        if judge_dir != expected_judge_dir:
+            raise JudgeBatchError(
+                f"task {task_id} judge_dir must equal <task_root>/xiaoyi_judge"
+            )
+        expected_halo_dir = (task_root / "xiaoyi_halo").resolve()
+        if halo_dir is None:
+            halo_dir = expected_halo_dir
+        elif halo_dir != expected_halo_dir:
+            raise JudgeBatchError(
+                f"task {task_id} halo_dir must equal <task_root>/xiaoyi_halo"
+            )
     return {
         "task_id": task_id,
         "adapter": adapter,
@@ -255,12 +296,20 @@ def _validate_entry_shape(entry: dict[str, Any], judge_root: Path) -> dict[str, 
         "outputs": _absolute_path(entry["outputs"], f"task {task_id} outputs", nullable=True),
         "runner_dir": _absolute_path(entry["runner_dir"], f"task {task_id} runner_dir", nullable=True),
         "trace": _absolute_path(entry["trace"], f"task {task_id} trace", nullable=True),
+        "task_root": task_root,
         "judge_dir": judge_dir,
+        "halo_dir": halo_dir,
     }
 
 
-def _prepare_entry(entry: dict[str, Any], judge_root: Path, *, force: bool) -> dict[str, Any]:
-    values = _validate_entry_shape(entry, judge_root)
+def _prepare_entry(
+    entry: dict[str, Any],
+    judge_root: Path,
+    *,
+    artifact_root: Path | None = None,
+    force: bool,
+) -> dict[str, Any]:
+    values = _validate_entry_shape(entry, judge_root, artifact_root=artifact_root)
     task_id = values["task_id"]
     record: dict[str, Any] = {
         "taskId": task_id,
@@ -270,6 +319,8 @@ def _prepare_entry(entry: dict[str, Any], judge_root: Path, *, force: bool) -> d
         "evidenceReady": values["evidence_ready"],
         "metadata": str(values["metadata"]) if values["metadata"] else None,
         "trace": str(values["trace"]) if values["trace"] else None,
+        "taskRoot": str(values["task_root"]) if values["task_root"] else None,
+        "haloDir": str(values["halo_dir"]) if values["halo_dir"] else None,
         "status": "runner-failure",
         "action": "not-judged",
         "preparedDir": str(values["judge_dir"]),
@@ -366,17 +417,48 @@ def prepare(args: argparse.Namespace) -> int:
         raise JudgeBatchError("judge batch runner_finished must be true before Prepare")
     judge_root = _absolute_path(batch.get("judge_root"), "judge_root")
     assert judge_root is not None
+    artifact_root = _absolute_path(
+        batch.get("artifact_root"), "artifact_root", nullable=True
+    )
+    if artifact_root is not None:
+        run_id = _task_id(batch.get("run_id"), "run_id")
+        if len(run_id) != 8 or not run_id.isdigit():
+            raise JudgeBatchError(
+                "task-centric run_id must be a date-only YYYYMMDD value"
+            )
+        expected_judge_root = (
+            artifact_root / "_xiaoyi_batches" / f"run_{run_id}"
+        ).resolve()
+        if judge_root != expected_judge_root:
+            raise JudgeBatchError(
+                "task-centric judge_root must equal "
+                "<artifact_root>/_xiaoyi_batches/run_<YYYYMMDD>"
+            )
     entries = batch.get("tasks")
     if not isinstance(entries, list) or not entries or not all(isinstance(item, dict) for item in entries):
         raise JudgeBatchError("judge batch tasks must be a non-empty object array")
     task_ids = [_task_id(item.get("task_id"), "tasks[].task_id") for item in entries]
     if len(set(task_ids)) != len(task_ids):
         raise JudgeBatchError("judge batch task_id values must be globally unique")
+    if artifact_root is not None:
+        task_roots = [
+            _absolute_path(item.get("task_root"), f"task {task_id} task_root")
+            for item, task_id in zip(entries, task_ids)
+        ]
+        if len(set(task_roots)) != len(task_roots):
+            raise JudgeBatchError("judge batch task_root values must be globally unique")
     judge_root.mkdir(parents=True, exist_ok=True)
     records: list[dict[str, Any]] = []
     for entry in entries:
         try:
-            records.append(_prepare_entry(entry, judge_root, force=args.force))
+            records.append(
+                _prepare_entry(
+                    entry,
+                    judge_root,
+                    artifact_root=artifact_root,
+                    force=args.force,
+                )
+            )
         except (OSError, JudgeBatchError) as exc:
             task_id = _task_id(entry.get("task_id"), "tasks[].task_id")
             records.append({
@@ -387,6 +469,8 @@ def prepare(args: argparse.Namespace) -> int:
                 "evidenceReady": entry.get("evidence_ready", entry.get("runner_status") == "completed"),
                 "metadata": entry.get("metadata") if isinstance(entry.get("metadata"), str) else None,
                 "trace": entry.get("trace") if isinstance(entry.get("trace"), str) else None,
+                "taskRoot": entry.get("task_root") if isinstance(entry.get("task_root"), str) else None,
+                "haloDir": entry.get("halo_dir") if isinstance(entry.get("halo_dir"), str) else None,
                 "status": "input-error",
                 "action": "not-judged",
                 "error": str(exc),
@@ -397,6 +481,7 @@ def prepare(args: argparse.Namespace) -> int:
         "runId": batch.get("run_id"),
         "sourceBatch": str(batch_path),
         "judgeRoot": str(judge_root),
+        "artifactRoot": str(artifact_root) if artifact_root else None,
         "createdAt": datetime.now().astimezone().isoformat(timespec="seconds"),
         "taskIds": task_ids,
         "tasks": records,
@@ -445,8 +530,10 @@ def summarize(args: argparse.Namespace) -> int:
             "passedRubrics": 0,
             "totalRubrics": 0,
             "passed": None,
+            "taskRoot": item.get("taskRoot"),
             "preparedDir": item.get("preparedDir"),
             "result": item.get("result"),
+            "haloDir": item.get("haloDir"),
         }
         if item.get("status") in {"runner-failure", "input-error"}:
             row["error"] = item.get("error")

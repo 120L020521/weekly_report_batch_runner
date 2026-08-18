@@ -457,9 +457,17 @@ def load_weekly_config(config_path: Path) -> dict[str, Any]:
             raise ValueError(f"配置必须是 JSON 对象: {config_path}")
         config.update(loaded)
     config_dir = config_path.resolve().parent
-    for key in ("metadata_root", "deliverables_root", "scripts_root", "output_root"):
-        config[key] = _resolve_path(config_dir, str(config[key]))
+    for key in ("metadata_root", "deliverables_root", "scripts_root", "output_root", "task_artifacts_root"):
+        if key in config:
+            config[key] = _resolve_path(config_dir, str(config[key]))
     return config
+
+
+def _task_output_root(config: dict[str, Any], task_id: str) -> Path:
+    task_artifacts_root = config.get("task_artifacts_root")
+    if task_artifacts_root is None:
+        return config["output_root"]
+    return Path(task_artifacts_root) / _task_case_id(task_id) / "xiaoyi_file_runs"
 
 
 def discover_tasks(metadata_root: Path) -> list[WeeklyTask]:
@@ -803,7 +811,7 @@ def _collect_task_artifacts(
 
 def run_weekly_task(task: WeeklyTask, config: dict[str, Any], *, target: str | None,
                     verbose: bool, dry_run: bool, rerun: bool) -> bool:
-    output_root: Path = config["output_root"]
+    output_root = _task_output_root(config, task.task_id)
     case_id = _task_case_id(task.task_id)
     task_dir = output_root / case_id
     execution_prompt = _build_execution_prompt(task.metadata["task"], config.get("prompt_suffix"))
@@ -1037,8 +1045,9 @@ def run_weekly_task(task: WeeklyTask, config: dict[str, Any], *, target: str | N
     return True
 
 
-def _task_handoff_entry(task: WeeklyTask, output_root: Path) -> dict[str, Any]:
+def _task_handoff_entry(task: WeeklyTask, config: dict[str, Any]) -> dict[str, Any]:
     case_id = _task_case_id(task.task_id)
+    output_root = _task_output_root(config, task.task_id)
     task_dir = output_root / case_id
     marker_names = (
         ("interrupted.json", "interrupted"),
@@ -1112,7 +1121,7 @@ def write_weekly_runner_handoff(
 ) -> Path:
     output_root: Path = config["output_root"]
     handoff_path = output_root / "weekly_runner_batch.json"
-    entries = [_task_handoff_entry(task, output_root) for task in tasks]
+    entries = [_task_handoff_entry(task, config) for task in tasks]
     effective_runner_finished = runner_finished and _handoff_inputs_ready(entries)
     payload = {
         "version": 1,
@@ -1124,6 +1133,11 @@ def write_weekly_runner_handoff(
             "metadata": str(Path(config["metadata_root"]).resolve()),
             "deliverables": str(Path(config["deliverables_root"]).resolve()),
             "logs": str(output_root.resolve()),
+            "taskArtifacts": (
+                str(Path(config["task_artifacts_root"]).resolve())
+                if config.get("task_artifacts_root") is not None
+                else None
+            ),
         },
         "taskIds": [task.task_id for task in tasks],
         "tasks": entries,
@@ -1138,10 +1152,11 @@ def run_person(person: str, tasks: list[WeeklyTask], config: dict[str, Any], *,
                stop_on_error: bool, skip_push: bool,
                skip_clear: bool, skip_initial_clear: bool,
                clear_on_interrupt: bool) -> tuple[int, int, bool, bool]:
-    output_root: Path = config["output_root"]
     pending = tasks if rerun else [
         task for task in tasks
-        if not is_case_completed(_task_case_id(task.task_id), str(output_root))
+        if not is_case_completed(
+            _task_case_id(task.task_id), str(_task_output_root(config, task.task_id))
+        )
     ]
     if not pending:
         print(f"[{person}] 任务均已完成，跳过该人员的数据推送与清理")
@@ -1274,7 +1289,9 @@ def main(argv: list[str] | None = None) -> int:
     try:
         for person_index, (person, person_tasks) in enumerate(grouped):
             has_pending = args.rerun or any(
-                not is_case_completed(_task_case_id(task.task_id), str(output_root))
+                not is_case_completed(
+                    _task_case_id(task.task_id), str(_task_output_root(config, task.task_id))
+                )
                 for task in person_tasks
             )
             if not has_pending:

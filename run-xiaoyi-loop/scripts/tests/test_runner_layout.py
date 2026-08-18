@@ -12,6 +12,14 @@ from batch_runner import RemoteLog, TaskSpec, TaskTimeoutError
 from prepare_logs import _is_judgeable_log_dir
 
 
+def test_task_centric_runner_root(tmp_path: Path) -> None:
+    args = SimpleNamespace(task_artifacts_root=str(tmp_path))
+
+    assert pipeline._task_logs_dir(args, tmp_path / "legacy", 112) == (
+        tmp_path / "task112" / "xiaoyi_file_runs"
+    ).resolve()
+
+
 def test_failed_trace_uses_canonical_path_and_remains_judgeable(
     tmp_path: Path,
     monkeypatch,

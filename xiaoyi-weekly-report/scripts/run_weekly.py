@@ -13,7 +13,10 @@ from typing import Any
 SKILL_ROOT = Path(__file__).resolve().parent.parent
 RUNTIME_ROOT = Path(__file__).resolve().parent / "runtime"
 BUNDLED_CONFIG = SKILL_ROOT / "assets" / "weekly_config.json"
-DATA_PATH_KEYS = {"metadata_root", "deliverables_root", "output_root", "scripts_root"}
+DATA_PATH_KEYS = {
+    "metadata_root", "deliverables_root", "output_root", "scripts_root",
+    "task_artifacts_root",
+}
 
 
 def _is_data_root(path: Path) -> bool:
@@ -80,6 +83,10 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--metadata-root", help="外部 task 目录")
     parser.add_argument("--deliverables-root", help="外部 deliverables_final 目录")
     parser.add_argument("--output-root", help="外部运行结果目录，默认 <project-root>/xiaoyi_logs")
+    parser.add_argument(
+        "--task-artifacts-root",
+        help="任务优先布局根目录；每个 Task 写入 <root>/task<ID>/xiaoyi_file_runs/。",
+    )
     parser.add_argument("--config", help="可选覆盖配置；其中 scripts_root 始终使用 Skill 内置脚本")
     known, forwarded = parser.parse_known_args(argv)
 
@@ -94,6 +101,12 @@ def main(argv: list[str] | None = None) -> int:
     )
     output_root = _external_path(
         known.output_root, custom_config, custom_config_path, "output_root"
+    )
+    task_artifacts_root = _external_path(
+        known.task_artifacts_root,
+        custom_config,
+        custom_config_path,
+        "task_artifacts_root",
     )
 
     data_root: Path | None = None
@@ -122,6 +135,11 @@ def main(argv: list[str] | None = None) -> int:
             "deliverables_root": str(deliverables_root),
             "scripts_root": str(RUNTIME_ROOT),
             "output_root": str(output_root),
+            **(
+                {"task_artifacts_root": str(task_artifacts_root)}
+                if task_artifacts_root is not None
+                else {}
+            ),
         }
     )
 
