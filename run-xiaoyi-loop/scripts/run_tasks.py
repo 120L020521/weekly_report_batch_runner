@@ -59,6 +59,10 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--date", dest="date_id", help="日志日期 ID。")
     parser.add_argument("--dynamic-date", action="store_true")
     parser.add_argument("--logs-dir", help="日志与 output 目录。")
+    parser.add_argument(
+        "--task-artifacts-root",
+        help="任务优先布局根目录；每个 Task 写入 <root>/task<ID>/xiaoyi_file_runs/。",
+    )
     parser.add_argument("--state-file", help="Runner 状态文件。")
     parser.add_argument("--poll", type=float)
     parser.add_argument("--timeout", type=int)
@@ -94,6 +98,7 @@ def _pipeline_arguments(
     _append_value(arguments, "--user-id", args.user_id)
     _append_value(arguments, "--date", args.date_id)
     _append_value(arguments, "--logs-dir", runtime_paths.logs_dir)
+    _append_value(arguments, "--task-artifacts-root", args.task_artifacts_root)
     _append_value(arguments, "--state-file", runtime_paths.state_file)
     _append_value(arguments, "--poll", args.poll)
     _append_value(arguments, "--timeout", args.timeout)

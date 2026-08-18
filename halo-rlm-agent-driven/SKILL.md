@@ -23,7 +23,14 @@ engine.
 - Use Python >= 3.10; no third-party package is required.
 - Read and write JSONL, JSON, prompt, manifest, and report files as UTF-8.
 - Treat Trace, metadata, Judge inputs, and unrelated files as read-only.
-- Write generated artifacts only below the supplied `OUTPUT_ROOT`.
+- For a single Task, write generated artifacts only below the supplied
+  `OUTPUT_ROOT`. For a Judge batch, write batch indexes and merged HTML below the
+  supplied `OUTPUT_ROOT`, and honor an explicitly validated `haloDir =
+  <taskRoot>/xiaoyi_halo` in each queue row for per-Task artifacts.
+- In batch mode, use the Judge queue's exact, path-safe `taskId` for both the
+  `<taskId>_halo` artifact directory and `<taskId>.halo.jsonl`; do not derive
+  either name from the source Trace filename. For weekly reports this `taskId`
+  is `metadata.absolute_id` and may be non-numeric.
 - Pass the exact Trace declared by the caller or Judge queue. Never replace it
   with an ancestor directory and never scan for alternate inputs.
 - Task and Judge data are evaluator context, not Trace evidence and never
@@ -63,8 +70,6 @@ The JSON result has one of two successful states:
 - emits a compact complete tool timeline;
 - maps every root, error candidate, and repeated call back to a contiguous,
   verbatim pre-conversion source excerpt;
-- records an explicit evidence gap instead of aborting the whole task when an
-  anomalous Span has no pre-conversion source mapping;
 - writes `halo_agent_input.json`, `halo_prompt.txt`, the prepared Trace,
   manifest, index cache when needed, and workflow state.
 
@@ -124,7 +129,7 @@ do not scan task directories:
 ```powershell
 & <python> -B "<skill_root>\scripts\halo_workflow.py" prepare-batch `
   --queue "<judge-root>\judge_queue.json" `
-  --output-root "<agent-workspace>\xiaoyi_halo" `
+  --output-root "<batch-dir>" `
   --mode all
 ```
 

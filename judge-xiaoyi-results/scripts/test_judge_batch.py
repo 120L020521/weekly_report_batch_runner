@@ -53,6 +53,13 @@ class UnifiedJudgeBatchTests(unittest.TestCase):
                     for name in ("Desktop", "Download", "Documents"):
                         (outputs / name).mkdir()
                 (outputs / "result.txt").write_text("ok", encoding="utf-8")
+                if adapter == "weekly-report":
+                    worklog = outputs / "memory" / "weekly-report-skill" / "worklog"
+                    worklog.mkdir(parents=True)
+                    (worklog / "events.jsonl").write_text("{}\n", encoding="utf-8")
+                    summary = outputs / "memory" / "weekly-report-skill" / "summary"
+                    summary.mkdir(parents=True)
+                    (summary / "summary.md").write_text("user summary", encoding="utf-8")
                 data = source / "data"
                 data.mkdir()
                 (data / "source.txt").write_text("source", encoding="utf-8")
@@ -99,7 +106,16 @@ class UnifiedJudgeBatchTests(unittest.TestCase):
                 metadata = json.loads((prepared_dir / "metadata.json").read_text(encoding="utf-8"))
                 self.assertTrue((prepared_dir / "output").is_dir())
                 self.assertTrue((prepared_dir / "data").is_dir())
-                self.assertTrue((prepared_dir / "runner").is_dir())
+                if row["adapter"] == "weekly-report":
+                    self.assertFalse((prepared_dir / "runner").exists())
+                    self.assertFalse(any(
+                        any(part.casefold() in {"worklog", "summary"} for part in path.parts)
+                        for path in (prepared_dir / "output").rglob("*")
+                    ))
+                    self.assertIsNone(manifest["sourcePaths"]["runnerDir"])
+                    self.assertIsNone(manifest["sourcePaths"]["trace"])
+                else:
+                    self.assertTrue((prepared_dir / "runner").is_dir())
                 result = {
                     "version": 1,
                     "taskId": row["taskId"],
@@ -142,6 +158,61 @@ class UnifiedJudgeBatchTests(unittest.TestCase):
             result = self.run_cli("prepare", "--batch", batch_path)
             self.assertEqual(result.returncode, 2)
             self.assertIn("runner_finished", result.stderr)
+
+    def test_task_centric_layout_keeps_batch_indexes_separate(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            batch_root = root / "_xiaoyi_batches" / "run_20260818"
+            task_root = root / "task112"
+            source = root / "source" / "112"
+            metadata_path = source / "metadata.json"
+            write_json(metadata_path, {
+                "absolute_id": "112",
+                "adapter": "workspacebench",
+                "task": "prepare one artifact",
+                "rubrics": ["artifact is correct"],
+            })
+            outputs = source / "outputs"
+            outputs.mkdir(parents=True)
+            (outputs / "result.txt").write_text("ok", encoding="utf-8")
+            trace = source / "task112.jsonl"
+            trace.write_text('{"trace_id":"t","span_id":"s"}\n', encoding="utf-8")
+            batch_path = batch_root / "judge_batch.json"
+            write_json(batch_path, {
+                "schema_version": 1,
+                "producer": "run-xiaoyi",
+                "runner_finished": True,
+                "run_id": "20260818",
+                "artifact_root": str(root.resolve()),
+                "judge_root": str(batch_root.resolve()),
+                "tasks": [{
+                    "task_id": "112",
+                    "adapter": "workspacebench",
+                    "runner_status": "completed",
+                    "execution_outcome": "completed",
+                    "evidence_ready": True,
+                    "metadata": str(metadata_path.resolve()),
+                    "data": None,
+                    "outputs": str(outputs.resolve()),
+                    "runner_dir": str(source.resolve()),
+                    "trace": str(trace.resolve()),
+                    "task_root": str(task_root.resolve()),
+                    "judge_dir": str((task_root / "xiaoyi_judge").resolve()),
+                    "halo_dir": str((task_root / "xiaoyi_halo").resolve()),
+                }],
+            })
+
+            prepared = self.run_cli("prepare", "--batch", batch_path)
+            self.assertEqual(prepared.returncode, 0, prepared.stderr)
+            queue_path = batch_root / "judge_queue.json"
+            queue = json.loads(queue_path.read_text(encoding="utf-8"))
+            row = queue["tasks"][0]
+            self.assertEqual(queue["artifactRoot"], str(root.resolve()))
+            self.assertEqual(row["taskRoot"], str(task_root.resolve()))
+            self.assertEqual(row["preparedDir"], str((task_root / "xiaoyi_judge").resolve()))
+            self.assertEqual(row["haloDir"], str((task_root / "xiaoyi_halo").resolve()))
+            self.assertTrue((task_root / "xiaoyi_judge" / "case_manifest.json").is_file())
+            self.assertFalse((batch_root / "task112").exists())
 
     def test_file_organization_judges_ready_snapshot_despite_failed_runner_outcome(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:

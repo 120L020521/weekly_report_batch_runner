@@ -10,6 +10,8 @@ SCRIPTS_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(SCRIPTS_ROOT))
 
 from runtime import dialog_history
+from runtime import case_manager
+from runtime import task_executor
 from runtime import weekly_runner as runner
 
 
@@ -45,21 +47,35 @@ class WeeklyRunnerArtifactTests(unittest.TestCase):
 
     def workspace_files(self, dialog_id: str = "dialog-21"):
         root = f"{runner._XIAOYI_WORKSPACE_ROOT}/{dialog_id}"
+        worklog_root = f"{root}/{runner._WEEKLY_WORKLOG_RELATIVE_ROOT}"
+        summary_root = f"{root}/{runner._WEEKLY_SUMMARY_RELATIVE_ROOT}"
         report = runner.RemoteFile(
             f"{root}/七月第一周周报.docx", 30, 2, "XiaoYiWorkspace", root
         )
         worklog = runner.RemoteFile(
-            f"{root}/{runner._WEEKLY_WORKLOG_RELATIVE_ROOT}/events.jsonl",
+            f"{worklog_root}/events.jsonl",
             20,
             2,
-            "XiaoYiWorkspace",
-            root,
+            "worklog",
+            worklog_root,
         )
-        return report, worklog
+        summary = runner.RemoteFile(
+            f"{summary_root}/summary.md",
+            10,
+            2,
+            "summary",
+            summary_root,
+        )
+        return report, worklog, summary
 
     def fake_pull_log(self, root: Path, task_id: str = "21"):
         def pull(*args, **kwargs):
-            path = root / "xiaoyi_logs" / f"task{task_id}" / f"task{task_id}.jsonl"
+            task_dir = kwargs.get("task_dir")
+            path = (
+                Path(task_dir) / f"{task_id}.jsonl"
+                if task_dir is not None
+                else root / "xiaoyi_logs" / task_id / f"{task_id}.jsonl"
+            )
             path.parent.mkdir(parents=True, exist_ok=True)
             path.write_text('{"event":"session_ended"}\n', encoding="utf-8")
             return path
@@ -87,25 +103,164 @@ class WeeklyRunnerArtifactTests(unittest.TestCase):
         self.assertEqual(task_text, runner._build_execution_prompt(task_text, ""))
         self.assertEqual(task_text, runner._build_execution_prompt(task_text, None))
 
+    def test_discovery_uses_absolute_id_and_ignores_metadata_id(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            task = self.make_task(root)
+            metadata = dict(task.metadata)
+            metadata["id"] = "must-not-be-used"
+            task.metadata_path.write_text(
+                json.dumps(metadata, ensure_ascii=False), encoding="utf-8"
+            )
+
+            discovered = runner.discover_tasks(root / "task")
+
+            self.assertEqual(["21"], [item.task_id for item in discovered])
+            self.assertEqual("21", runner._task_case_id(discovered[0].task_id))
+
+    def test_discovery_accepts_non_numeric_absolute_id(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            task = self.make_task(root, "weekly-chen-first")
+
+            discovered = runner.discover_tasks(root / "task")
+
+            self.assertEqual(["weekly-chen-first"], [item.task_id for item in discovered])
+            self.assertEqual(
+                "weekly-chen-first", runner._task_case_id(task.metadata["absolute_id"])
+            )
+
+    def test_helpers_write_directly_to_explicit_task_directory(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            task_dir = root / "weekly-chen-first" / "xiaoyi_file_runs"
+            prompt = task_executor.save_prompt_text(
+                "测试任务",
+                case_id="weekly-chen-first",
+                run_dir=str(task_dir.parent),
+                task_dir=task_dir,
+            )
+            case_manager.mark_case_completed(
+                "weekly-chen-first",
+                str(task_dir.parent),
+                case_dir=str(task_dir),
+            )
+
+            self.assertEqual(task_dir / "weekly-chen-first.prompt.txt", prompt)
+            self.assertTrue((task_dir / "completed.json").is_file())
+            self.assertFalse((task_dir / "weekly-chen-first").exists())
+
+    def test_note_mock_target_resolves_person_and_week(self):
+        first = runner.WeeklyTask(
+            "陈景明", "1", Path("task/陈景明/1/metadata.json"),
+            {"task": "生成七月第一周周报总结"},
+        )
+        second = runner.WeeklyTask(
+            "周泽宇", "162", Path("task/周泽宇/162/metadata.json"),
+            {"task": "生成七月第二周周报总结"},
+        )
+        explicit = runner.WeeklyTask(
+            "任意人员", "999", Path("task/任意人员/999/metadata.json"),
+            {"task": "自定义周报", "mock_target": "S2"},
+        )
+        self.assertEqual("c1", runner._resolve_mock_target(first))
+        self.assertEqual("z2", runner._resolve_mock_target(second))
+        self.assertEqual("s2", runner._resolve_mock_target(explicit))
+
+    def test_note_mock_target_rejects_unavailable_week(self):
+        task = runner.WeeklyTask(
+            "陈景明", "3", Path("task/陈景明/3/metadata.json"),
+            {"task": "生成七月第三周周报总结"},
+        )
+        with self.assertRaisesRegex(ValueError, "只声明第一周和第二周"):
+            runner._resolve_mock_target(task)
+
+    def test_note_prepare_invokes_repository_script(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            script = root / "note" / "data_yangshi" / "jiaoben" / "run_data_mock.py"
+            script.parent.mkdir(parents=True)
+            script.write_text("# test\n", encoding="utf-8")
+            task = runner.WeeklyTask(
+                "陈景明", "1", root / "metadata.json",
+                {"task": "生成七月第一周周报总结"},
+            )
+            with patch.object(runner, "_stream_command") as stream:
+                runner._call_prepare_task_data(
+                    task, {"mock_runner_script": script}, dry_run=False
+                )
+            command = stream.call_args.args[0]
+            self.assertEqual([sys.executable, "-B", str(script), "c1"], command)
+            self.assertEqual(script.parent, stream.call_args.kwargs["cwd"])
+
+    def test_person_lifecycle_is_prepare_then_execute_for_each_task(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            tasks = [
+                runner.WeeklyTask(
+                    "陈景明", "1", root / "1" / "metadata.json",
+                    {"task": "生成七月第一周周报总结"},
+                ),
+                runner.WeeklyTask(
+                    "陈景明", "2", root / "2" / "metadata.json",
+                    {"task": "生成七月第二周周报总结"},
+                ),
+            ]
+            events = []
+            config = {"output_root": root, "task_interval": 0}
+            with (
+                patch.object(
+                    runner, "_call_prepare_task_data",
+                    side_effect=lambda task, config, dry_run: events.append(
+                        ("prepare", task.task_id)
+                    ),
+                ),
+                patch.object(
+                    runner, "run_weekly_task",
+                    side_effect=lambda task, *args, **kwargs: (
+                        events.append(("execute-and-pull", task.task_id)) or True
+                    ),
+                ),
+            ):
+                succeeded, failed, lifecycle_failed, cleaned = runner.run_person(
+                    "陈景明", tasks, config,
+                    target=None, verbose=False, dry_run=False, rerun=False,
+                    stop_on_error=False, skip_push=False, skip_clear=False,
+                    skip_initial_clear=False, clear_on_interrupt=False,
+                )
+            self.assertEqual(
+                [
+                    ("prepare", "1"), ("execute-and-pull", "1"),
+                    ("prepare", "2"), ("execute-and-pull", "2"),
+                ],
+                events,
+            )
+            self.assertEqual((2, 0, False, False), (succeeded, failed, lifecycle_failed, cleaned))
+
     def test_dialog_workspace_listing_uses_only_fixed_paths(self):
         dialog_root = f"{runner._XIAOYI_WORKSPACE_ROOT}/dialog-21"
         worklog_root = f"{dialog_root}/{runner._WEEKLY_WORKLOG_RELATIVE_ROOT}"
+        summary_root = f"{dialog_root}/{runner._WEEKLY_SUMMARY_RELATIVE_ROOT}"
         response = (
             f"2|30|{dialog_root}/七月第一周周报.docx\n"
             "__WORKLOG__\n"
             f"3|20|{worklog_root}/events.jsonl\n"
+            "__SUMMARY__\n"
+            f"4|10|{summary_root}/summary.md\n"
             "__END__\n"
         )
         with patch.object(runner, "remote_shell", return_value=response) as remote:
-            reports, worklogs = runner.list_dialog_workspace_artifacts(
+            reports, worklogs, summaries = runner.list_dialog_workspace_artifacts(
                 "dialog-21", target=None, verbose=False
             )
 
         self.assertEqual([f"{dialog_root}/七月第一周周报.docx"], [item.path for item in reports])
         self.assertEqual([f"{worklog_root}/events.jsonl"], [item.path for item in worklogs])
+        self.assertEqual([f"{summary_root}/summary.md"], [item.path for item in summaries])
         command = remote.call_args.args[0]
         self.assertIn(f"find '{dialog_root}' -mindepth 1 -maxdepth 1 -type f", command)
         self.assertIn(f"find '{worklog_root}' -type f", command)
+        self.assertIn(f"find '{summary_root}' -type f", command)
         self.assertNotIn("Desktop", command)
         self.assertNotIn("Documents", command)
 
@@ -113,11 +268,13 @@ class WeeklyRunnerArtifactTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             runner.list_dialog_workspace_artifacts("../other", target=None, verbose=False)
 
-    def test_task_pulls_workspace_report_worklog_and_original_trace(self):
+    def test_task_pulls_workspace_report_worklog_summary_and_original_trace(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             root = Path(temp_dir)
             task = self.make_task(root)
-            report, worklog = self.workspace_files()
+            config = self.config(root)
+            config["task_artifacts_root"] = root / "agent-workspace"
+            report, worklog, summary = self.workspace_files()
             done_log = runner.RemoteLog("100", "task.jsonl", "/logs/task.jsonl", 1, 1)
             with (
                 patch.object(runner, "list_remote_logs", return_value=[]),
@@ -132,7 +289,7 @@ class WeeklyRunnerArtifactTests(unittest.TestCase):
                 patch.object(runner, "get_latest_dialog_page_id", return_value="dialog-21") as history,
                 patch.object(
                     runner, "list_dialog_workspace_artifacts",
-                    return_value=([report], [worklog]),
+                    return_value=([report], [worklog], [summary]),
                 ),
                 patch.object(
                     runner, "pull_remote_files", side_effect=self.fake_pull_remote_files
@@ -140,22 +297,29 @@ class WeeklyRunnerArtifactTests(unittest.TestCase):
                 patch.object(runner, "force_stop"),
             ):
                 succeeded = runner.run_weekly_task(
-                    task, self.config(root), target=None, verbose=False,
+                    task, config, target=None, verbose=False,
                     dry_run=False, rerun=False
                 )
 
             self.assertTrue(succeeded)
             history.assert_called_once()
-            task_dir = root / "xiaoyi_logs" / "task21"
-            self.assertTrue((task_dir / "task21.jsonl").is_file())
+            task_dir = root / "agent-workspace" / "21" / "xiaoyi_file_runs"
+            self.assertTrue((task_dir / "21.jsonl").is_file())
+            self.assertFalse((task_dir / "21").exists())
             self.assertTrue(
                 (task_dir / "outputs" / "XiaoYiWorkspace" / "七月第一周周报.docx").is_file()
             )
             self.assertTrue(
                 (
-                    task_dir / "outputs" / "XiaoYiWorkspace" / "memory"
-                    / "weekly-report-skill" / "worklog" / "events.jsonl"
+                    task_dir / "worklog" / "events.jsonl"
                 ).is_file()
+            )
+            self.assertTrue((task_dir / "summary" / "summary.md").is_file())
+            self.assertFalse(
+                (task_dir / "outputs" / "XiaoYiWorkspace" / "memory" / "weekly-report-skill" / "worklog").exists()
+            )
+            self.assertFalse(
+                (task_dir / "outputs" / "XiaoYiWorkspace" / "memory" / "weekly-report-skill" / "summary").exists()
             )
             manifest = json.loads(
                 (task_dir / "artifacts_manifest.json").read_text(encoding="utf-8")
@@ -163,12 +327,13 @@ class WeeklyRunnerArtifactTests(unittest.TestCase):
             self.assertEqual("dialog-21", manifest["dialog_id"])
             self.assertEqual("dialog-workspace-root", manifest["outputs"][0]["selection_source"])
             self.assertEqual("dialog-weekly-worklog", manifest["worklogs"][0]["selection_source"])
+            self.assertEqual("dialog-weekly-summary", manifest["summaries"][0]["selection_source"])
 
     def test_task_continues_same_dialog_after_confirmation(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             root = Path(temp_dir)
             task = self.make_task(root)
-            report, worklog = self.workspace_files()
+            report, worklog, _summary = self.workspace_files()
             first_log = runner.RemoteLog("100", "first.jsonl", "/logs/first.jsonl", 1, 1)
             final_log = runner.RemoteLog("100", "final.jsonl", "/logs/final.jsonl", 1, 1)
             with (
@@ -189,7 +354,7 @@ class WeeklyRunnerArtifactTests(unittest.TestCase):
                 patch.object(runner, "get_latest_dialog_page_id", return_value="dialog-21") as history,
                 patch.object(
                     runner, "list_dialog_workspace_artifacts",
-                    return_value=([report], [worklog]),
+                    return_value=([report], [worklog], []),
                 ),
                 patch.object(
                     runner, "pull_remote_files", side_effect=self.fake_pull_remote_files
@@ -211,10 +376,11 @@ class WeeklyRunnerArtifactTests(unittest.TestCase):
             )
             stopped.assert_called_once()
             marker = json.loads(
-                (root / "xiaoyi_logs" / "task21" / "completed.json").read_text(encoding="utf-8")
+                (root / "xiaoyi_logs" / "21" / "completed.json").read_text(encoding="utf-8")
             )
             self.assertEqual("dialog-21", marker["result"]["dialog_id"])
             self.assertEqual(2, marker["result"]["pushes"])
+            self.assertEqual(0, marker["result"]["summaries_pulled"])
 
     def test_missing_dialog_id_fails_workspace_collection_but_keeps_trace(self):
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -239,8 +405,8 @@ class WeeklyRunnerArtifactTests(unittest.TestCase):
 
             self.assertFalse(succeeded)
             listing.assert_not_called()
-            task_dir = root / "xiaoyi_logs" / "task22"
-            self.assertTrue((task_dir / "task22.jsonl").is_file())
+            task_dir = root / "xiaoyi_logs" / "22"
+            self.assertTrue((task_dir / "22.jsonl").is_file())
             self.assertTrue((task_dir / "failed.json").is_file())
 
     def test_stop_content_classification(self):
@@ -285,9 +451,9 @@ class WeeklyRunnerArtifactTests(unittest.TestCase):
             root = Path(temp_dir)
             task = self.make_task(root)
             output_root = root / "xiaoyi_logs"
-            task_dir = output_root / "task21"
+            task_dir = output_root / "21"
             (task_dir / "outputs").mkdir(parents=True)
-            (task_dir / "task21.jsonl").write_text("{}\n", encoding="utf-8")
+            (task_dir / "21.jsonl").write_text("{}\n", encoding="utf-8")
             (task_dir / "completed.json").write_text("{}", encoding="utf-8")
             config = {
                 "metadata_root": root / "task",
@@ -316,9 +482,9 @@ class WeeklyRunnerArtifactTests(unittest.TestCase):
             root = Path(temp_dir)
             task = self.make_task(root)
             output_root = root / "xiaoyi_logs"
-            task_dir = output_root / "task21"
+            task_dir = output_root / "21"
             task_dir.mkdir(parents=True)
-            (task_dir / "task21.jsonl").write_text("{}\n", encoding="utf-8")
+            (task_dir / "21.jsonl").write_text("{}\n", encoding="utf-8")
             (task_dir / "completed.json").write_text("{}", encoding="utf-8")
             config = {
                 "metadata_root": root / "task",
@@ -331,6 +497,36 @@ class WeeklyRunnerArtifactTests(unittest.TestCase):
             self.assertFalse(
                 json.loads(handoff_path.read_text(encoding="utf-8"))["runnerFinished"]
             )
+
+    def test_task_centric_handoff_uses_per_task_runner_root(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            task = self.make_task(root)
+            batch_root = root / "_xiaoyi_batches" / "run_20260818"
+            task_artifacts_root = root
+            runner_root = root / "21" / "xiaoyi_file_runs"
+            task_dir = runner_root
+            (task_dir / "outputs").mkdir(parents=True)
+            (task_dir / "21.jsonl").write_text("{}\n", encoding="utf-8")
+            (task_dir / "completed.json").write_text("{}", encoding="utf-8")
+            config = {
+                "metadata_root": root / "task",
+                "deliverables_root": root / "deliverables_final",
+                "output_root": batch_root,
+                "task_artifacts_root": task_artifacts_root,
+            }
+
+            handoff_path = runner.write_weekly_runner_handoff(
+                [task], config, run_date="20260818", runner_finished=True
+            )
+            payload = json.loads(handoff_path.read_text(encoding="utf-8"))
+            entry = payload["tasks"][0]
+            self.assertEqual(handoff_path, batch_root / "weekly_runner_batch.json")
+            self.assertEqual(entry["judgeInputs"]["runnerTaskDir"], str(task_dir.resolve()))
+            self.assertEqual(entry["judgeInputs"]["outputs"], str((task_dir / "outputs").resolve()))
+            self.assertEqual(payload["roots"]["taskArtifacts"], str(root.resolve()))
+            self.assertTrue(payload["runnerFinished"])
+            self.assertFalse((runner_root / "21").exists())
 
 
 if __name__ == "__main__":

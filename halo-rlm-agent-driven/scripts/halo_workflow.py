@@ -59,6 +59,23 @@ def _write_json(path: Path, value: Any) -> None:
     temporary.replace(path)
 
 
+def _artifact_id(value: Any) -> str:
+    if isinstance(value, bool) or not isinstance(value, (str, int)):
+        raise ValueError("taskId must be a string or integer")
+    normalized = str(value).strip()
+    invalid_chars = '<>:"/\\|?*'
+    if (
+        not normalized
+        or normalized in {".", ".."}
+        or ".." in normalized
+        or normalized.endswith((" ", "."))
+        or any(char in normalized for char in invalid_chars)
+        or any(ord(char) < 32 for char in normalized)
+    ):
+        raise ValueError(f"unsafe taskId: {value!r}")
+    return normalized
+
+
 def _sha256(path: Path | None) -> str:
     if path is None:
         return "MISSING"
@@ -242,24 +259,9 @@ def _mechanical_evidence(source_path: Path, trace_path: Path) -> dict[str, Any]:
         for record in roots + candidates
     } | repeated_source_keys
     raw_evidence: list[dict[str, Any]] = []
-    raw_evidence_gaps: list[dict[str, Any]] = []
     for key in sorted(raw_keys, key=lambda item: (item[0], evidence_map[item].span_index if item in evidence_map else 10**9)):
         mapped = evidence_map.get(key)
         if mapped is None:
-            raw_evidence_gaps.append({
-                "trace_id": key[0],
-                "span_id": key[1],
-                "span_index": None,
-                "reason": "prepared span has no source-evidence mapping",
-            })
-            continue
-        if not mapped.candidates:
-            raw_evidence_gaps.append({
-                "trace_id": mapped.trace_id,
-                "span_id": mapped.span_id,
-                "span_index": mapped.span_index,
-                "reason": "no pre-conversion source events map to this span",
-            })
             continue
         excerpt = choose_source_excerpt(mapped, max_chars=RAW_LOG_EXCERPT_MAX_CHARS)
         raw_evidence.append({
@@ -300,7 +302,6 @@ def _mechanical_evidence(source_path: Path, trace_path: Path) -> dict[str, Any]:
             "tool_call_count": len(tools),
             "error_candidate_count": len(candidates),
             "repeated_signature_count": len(repeated),
-            "raw_evidence_gap_count": len(raw_evidence_gaps),
             "skipped_jsonl_lines": skipped,
         },
         "trace_summaries": trace_summaries,
@@ -314,7 +315,6 @@ def _mechanical_evidence(source_path: Path, trace_path: Path) -> dict[str, Any]:
         "tool_call_counts": dict(sorted(Counter(item["tool"] for item in tools).items())),
         "tool_timeline": tools,
         "raw_evidence_by_span": raw_evidence,
-        "raw_evidence_gaps": raw_evidence_gaps,
     }
 
 
@@ -372,9 +372,20 @@ def _validate_existing(report: Path, manifest: Path, adapter: str) -> tuple[bool
         return False, str(exc)
 
 
-def _prepare_artifacts(source: Path, output_root: Path, force: bool) -> dict[str, Path]:
+def _prepare_artifacts(
+    source: Path,
+    output_root: Path,
+    force: bool,
+    artifact_id: str | None = None,
+) -> dict[str, Path]:
     detected = detect_format(source)
-    selected, prompt, report, manifest = _artifact_paths(source, detected, source.parent, output_root)
+    selected, prompt, report, manifest = _artifact_paths(
+        source,
+        detected,
+        source.parent,
+        output_root,
+        logical_name_override=artifact_id,
+    )
     previous_mtime = selected.stat().st_mtime_ns if selected.is_file() else None
     _, prepared = prepare_trace(source, selected, force)
     entry = {
@@ -416,8 +427,9 @@ def prepare_one(args: argparse.Namespace) -> dict[str, Any]:
     adapter = args.adapter.strip().lower()
     surfaces = _surfaces(adapter)
     task = _read_object(metadata_path, "metadata")
+    artifact_id = _artifact_id(args.task_id) if args.task_id else None
     if args.task_id:
-        task["task_id"] = args.task_id
+        task["task_id"] = artifact_id
     elif task and not any(key in task for key in ("task_id", "id", "taskId")):
         task["task_id"] = metadata_path.parent.name if metadata_path else source.stem
     judge = _read_object(judge_path, "Judge")
@@ -434,7 +446,7 @@ def prepare_one(args: argparse.Namespace) -> dict[str, Any]:
         additional_request=additional,
         evidence_packet=True,
     )
-    artifacts = _prepare_artifacts(source, output_root, args.force)
+    artifacts = _prepare_artifacts(source, output_root, args.force, artifact_id)
     fingerprint, fingerprint_parts = _fingerprint(
         source,
         artifacts["trace"],
@@ -595,6 +607,20 @@ def _selected(item: dict[str, Any], mode: str, judge: dict[str, Any]) -> bool:
     )
 
 
+def _batch_task_output_root(item: dict[str, Any], fallback: Path, task_id: str) -> Path:
+    raw = item.get("haloDir")
+    if not isinstance(raw, str) or not raw.strip():
+        return fallback
+    task_root_raw = item.get("taskRoot")
+    if not isinstance(task_root_raw, str) or not task_root_raw.strip():
+        raise ValueError(f"task {task_id} haloDir requires taskRoot")
+    task_root = Path(task_root_raw).expanduser().resolve()
+    halo_dir = Path(raw).expanduser().resolve()
+    if halo_dir != (task_root / "xiaoyi_halo").resolve():
+        raise ValueError(f"task {task_id} haloDir must equal <taskRoot>/xiaoyi_halo")
+    return halo_dir
+
+
 def prepare_batch(args: argparse.Namespace) -> dict[str, Any]:
     queue_path = args.queue.expanduser().resolve()
     queue = _read_object(queue_path, "Judge queue")
@@ -623,9 +649,10 @@ def prepare_batch(args: argparse.Namespace) -> dict[str, Any]:
         if metadata is None and isinstance(item.get("metadata"), str):
             metadata = Path(item["metadata"]).resolve()
         try:
+            task_output_root = _batch_task_output_root(item, output_root, task_id)
             row = prepare_one(SimpleNamespace(
                 trace=trace,
-                output_root=output_root,
+                output_root=task_output_root,
                 metadata=metadata,
                 judge=result_path if result_path and result_path.is_file() else None,
                 adapter=str(item.get("adapter") or "workspacebench"),

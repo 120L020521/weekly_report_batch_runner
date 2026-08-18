@@ -129,8 +129,9 @@ def _artifact_paths(
     detected: str,
     source_root: Path,
     output_root: Path,
+    logical_name_override: str | None = None,
 ) -> tuple[Path, Path, Path, Path]:
-    logical_name = _logical_name(source, detected)
+    logical_name = logical_name_override or _logical_name(source, detected)
     relative_parent = source.parent.relative_to(source_root)
     if not relative_parent.parts:
         artifact_dir = output_root / f"{logical_name}_halo"

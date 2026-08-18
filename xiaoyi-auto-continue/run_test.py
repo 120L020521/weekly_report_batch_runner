@@ -549,6 +549,8 @@ def main():
                         help='Run date for output directory (default: today)')
     parser.add_argument('--output-base',
                         help='Override output root (the run_<date> directory is created below it)')
+    parser.add_argument('--task-artifacts-root',
+                        help='Task-first root; writes this case below <root>/<case>/xiaoyi_file_runs/')
     parser.add_argument('--skip-setup', action='store_true',
                         help='Skip file setup (assume files already sent)')
     parser.add_argument('--clean', action='store_true',
@@ -569,6 +571,11 @@ def main():
                         help='Query to send when continuing dialog (default: 继续)')
     args = parser.parse_args()
 
+    if args.task_artifacts_root and not args.case:
+        parser.error('--task-artifacts-root requires exactly one --case invocation')
+    if args.task_artifacts_root and args.output_base:
+        parser.error('--task-artifacts-root and --output-base are mutually exclusive')
+
     # 加载配置
     if os.path.exists(args.config):
         config = load_config(args.config)
@@ -577,7 +584,11 @@ def main():
         sys.exit(1)
 
     test_file_base = config['test_file_base']
-    output_base = args.output_base or config.get('output_base', 'test_runs')
+    output_base = (
+        os.path.join(args.task_artifacts_root, args.case, 'xiaoyi_file_runs')
+        if args.task_artifacts_root
+        else (args.output_base or config.get('output_base', 'test_runs'))
+    )
     output_base = os.path.abspath(os.path.expanduser(output_base))
 
     # 确定运行目录

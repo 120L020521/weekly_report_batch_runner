@@ -42,6 +42,20 @@ def _artifact_dir(output_root: Path, task_id: str) -> Path:
     return output_root / leaf
 
 
+def _task_output_root(item: dict[str, Any], output_root: Path, task_id: str) -> Path:
+    raw = item.get("haloDir")
+    if not isinstance(raw, str) or not raw.strip():
+        return output_root
+    task_root_raw = item.get("taskRoot")
+    if not isinstance(task_root_raw, str) or not task_root_raw.strip():
+        raise ValueError(f"task {task_id} haloDir requires taskRoot")
+    task_root = Path(task_root_raw).expanduser().resolve()
+    halo_dir = Path(raw).expanduser().resolve()
+    if halo_dir != (task_root / "xiaoyi_halo").resolve():
+        raise ValueError(f"task {task_id} haloDir must equal <taskRoot>/xiaoyi_halo")
+    return halo_dir
+
+
 def read_batch_payload(path: Path) -> dict[str, Any] | None:
     if not path.is_file():
         return None
@@ -116,7 +130,7 @@ def _task_record(item: dict[str, Any], output_root: Path, mode: str) -> tuple[di
         or not judge_ok
         or judge.get("passed") is False
     )
-    artifact = _artifact_dir(output_root, task_id)
+    artifact = _artifact_dir(_task_output_root(item, output_root, task_id), task_id)
     report_path = artifact / "halo_report.json"
     record: dict[str, Any] = {
         "task_id": task_id,

@@ -40,7 +40,10 @@ class BatchReportTests(unittest.TestCase):
                 trace = root / "logs" / task_id / "trace.jsonl"
                 trace.parent.mkdir(parents=True)
                 trace.write_text("{}\n", encoding="utf-8")
-                artifact = halo / (f"task{task_id}_halo" if task_id.isdigit() else f"{task_id}_halo")
+                task_key = f"task{task_id}" if task_id.isdigit() else task_id
+                task_root = root / task_key
+                task_halo = task_root / "xiaoyi_halo"
+                artifact = task_halo / (f"task{task_id}_halo" if task_id.isdigit() else f"{task_id}_halo")
                 write_json(artifact / "halo_report.json", {
                     "schema_version": 9,
                     "report_summary": {
@@ -63,6 +66,8 @@ class BatchReportTests(unittest.TestCase):
                     "trace": str(trace.resolve()),
                     "preparedDir": str(prepared.resolve()),
                     "result": str(result.resolve()),
+                    "taskRoot": str(task_root.resolve()),
+                    "haloDir": str(task_halo.resolve()),
                 })
             queue = root / "judge" / "judge_queue.json"
             write_json(queue, {

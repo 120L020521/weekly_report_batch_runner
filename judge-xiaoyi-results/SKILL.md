@@ -25,7 +25,8 @@ is terminal:
   "producer": "run-xiaoyi",
   "runner_finished": true,
   "run_id": "20260817",
-  "judge_root": "D:/workspace/xiaoyi_judge/20260817",
+  "artifact_root": "D:/workspace",
+  "judge_root": "D:/workspace/_xiaoyi_batches/run_20260817",
   "tasks": [
     {
       "task_id": "21",
@@ -35,10 +36,12 @@ is terminal:
       "evidence_ready": true,
       "metadata": "D:/workspace/task/何沐/21/metadata.json",
       "data": "D:/workspace/task/何沐/data",
-      "outputs": "D:/workspace/xiaoyi_logs/task21/outputs",
-      "runner_dir": "D:/workspace/xiaoyi_logs/task21",
-      "trace": "D:/workspace/xiaoyi_logs/task21/task21.jsonl",
-      "judge_dir": "D:/workspace/xiaoyi_judge/20260817/task21"
+      "outputs": "D:/workspace/task21/xiaoyi_file_runs/task21/outputs",
+      "runner_dir": "D:/workspace/task21/xiaoyi_file_runs/task21",
+      "trace": "D:/workspace/task21/xiaoyi_file_runs/task21/task21.jsonl",
+      "task_root": "D:/workspace/task21",
+      "judge_dir": "D:/workspace/task21/xiaoyi_judge",
+      "halo_dir": "D:/workspace/task21/xiaoyi_halo"
     }
   ]
 }
@@ -46,13 +49,18 @@ is terminal:
 
 Require globally unique ordered string IDs, one of `file-organization`,
 `workspacebench`, or `weekly-report`, normalized Runner status, explicit absolute
-paths, and a unique `judge_dir` below `judge_root`. Optional `data`, `runner_dir`,
-and `trace` may be `null`; every path key must still exist. New batches also
+paths, and a unique `task_root` below `artifact_root`. Require
+`judge_dir = <task_root>/xiaoyi_judge` and
+`halo_dir = <task_root>/xiaoyi_halo`; `judge_root` is the batch-only directory
+for queue and summary files. Optional `data`, `runner_dir`, and `trace` may be
+`null`; every path key must still exist. New batches also
 preserve the Runner-native `execution_outcome` and boolean `evidence_ready`.
 Only `evidence_ready = true` is Judgeable; it requires non-null metadata and
 outputs but does not require `runner_status = completed` or a Trace.
 
-For backward compatibility, a schema-v1 batch without `evidence_ready` defaults
+For backward compatibility, a schema-v1 batch without `artifact_root` keeps the
+legacy rule that each `judge_dir` must be below `judge_root`; a batch without
+`evidence_ready` defaults
 to `runner_status = completed`; `execution_outcome` may be absent or `null`.
 This lets file-organization cases with a complete final snapshot be evaluated
 after `incomplete-after-3-continues` or `execution-error`, while preserving that
@@ -79,6 +87,11 @@ returned `judge_queue.json`. Every ready task has the same frozen structure:
 ├── output/
 └── runner/               # only when runner_dir or trace is supplied
 ```
+
+For `weekly-report`, never create `runner/`; do not copy Runner evidence, Trace,
+or any directory/file named `worklog`, `work_log`, `work-log`, or `summary` into frozen
+Judge evidence. Preserve the Trace only in `judge_queue.json` for downstream
+HALO.
 
 Prepare copies only declared sources, omits an embedded runner `output/` or
 `outputs/` subtree, fingerprints the frozen evidence, and records exact source
@@ -130,13 +143,12 @@ result with `judgeType = codex-subagent`.
 
 ### Weekly report
 
-Use the same Agent-evaluator contract as WorkspaceBench, with these additional
-checks when required by rubrics: output format, exact reporting date range,
-person/department/job identity, source-supported facts, required sections,
-readability, and worklog presence. Verify time range against both generated
-report content and dated source evidence. Material facts outside the requested
-period fail the relevant rubric. Write only the assigned result with
-`judgeType = codex-subagent`.
+Give the worker only its task ID, prepared directory, result path, and this
+Skill. Require it to inspect only `metadata.json`, `case_manifest.json`, supplied
+`data/`, and generated reports under `output/`. Never inspect or score worklog, summary,
+Runner evidence, or Trace. Evaluate only the metadata rubrics, including output
+format and source-supported content consistency when requested. Write only the
+assigned result with `judgeType = codex-subagent`.
 
 ## Common result schema and validation
 

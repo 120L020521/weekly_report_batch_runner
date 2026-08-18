@@ -124,12 +124,19 @@ def read_prompt_text(prompt_file: str) -> str:
     return query
 
 
-def save_prompt_text(query_text: str, *, case_id: str, run_dir: str, tag: str = "prompt") -> Path:
+def save_prompt_text(
+    query_text: str,
+    *,
+    case_id: str,
+    run_dir: str,
+    tag: str = "prompt",
+    task_dir: str | Path | None = None,
+) -> Path:
     """把推送给小艺的 query 文本单独落盘到 case 目录，便于事后回查。
 
     tag 用于区分首次启动 (prompt) 与续接 (continue)。
     """
-    run_path = Path(run_dir) / case_id
+    run_path = Path(task_dir) if task_dir is not None else Path(run_dir) / case_id
     run_path.mkdir(parents=True, exist_ok=True)
     out_file = run_path / f"{case_id}.{tag}.txt"
     out_file.write_text(query_text, encoding="utf-8")
@@ -144,10 +151,11 @@ def pull_log(
     run_dir: str,
     target: str | None,
     verbose: bool = False,
+    task_dir: str | Path | None = None,
 ) -> Path:
     """拉取远程日志到本地"""
     run_name = case_id
-    run_path = Path(run_dir) / run_name
+    run_path = Path(task_dir) if task_dir is not None else Path(run_dir) / run_name
     run_path.mkdir(parents=True, exist_ok=True)
     local_log = run_path / f"{run_name}.jsonl"
 
@@ -271,7 +279,13 @@ def pull_outputs(
     return pulled_files
 
 
-def extract_stop_content(local_log: Path, case_id: str, run_dir: str | Path) -> str | None:
+def extract_stop_content(
+    local_log: Path,
+    case_id: str,
+    run_dir: str | Path,
+    *,
+    task_dir: str | Path | None = None,
+) -> str | None:
     """从本地 JSONL 日志中提取 stop_reason=stop 的 assistant content（取最后一处），并落盘保存"""
     last_content = None
     try:
@@ -315,7 +329,7 @@ def extract_stop_content(local_log: Path, case_id: str, run_dir: str | Path) -> 
             print(f"[{case_id}] ====================\n")
 
             # 落盘保存
-            run_path = Path(run_dir) / case_id
+            run_path = Path(task_dir) if task_dir is not None else Path(run_dir) / case_id
             run_path.mkdir(parents=True, exist_ok=True)
             content_file = run_path / f"{case_id}.content.txt"
             content_file.write_text(last_content, encoding='utf-8')

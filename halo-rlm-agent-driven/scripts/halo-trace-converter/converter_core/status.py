@@ -16,7 +16,6 @@ FAILURE_STATES = {
     "error",
     "failed",
     "failure",
-    "interrupted",
     "status_code_error",
     "timed_out",
     "timeout",

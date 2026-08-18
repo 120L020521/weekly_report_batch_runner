@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""按人员执行周报 metadata：预制数据、逐任务执行、拉取、最终清理。"""
+"""串行执行周报 metadata：note 清空+推送、执行、拉取。"""
 
 from __future__ import annotations
 
@@ -60,6 +60,7 @@ DEFAULTS: dict[str, Any] = {
     "metadata_root": "external:task",
     "deliverables_root": "external:deliverables_final",
     "scripts_root": "../scripts/runtime",
+    "mock_runner_script": "external:note/data_yangshi/jiaoben/run_data_mock.py",
     "output_root": "external:xiaoyi_logs",
     "month": "2026-07",
     "calendar_start": "2026-07-01",
@@ -69,7 +70,6 @@ DEFAULTS: dict[str, Any] = {
     "poll_seconds": 3,
     "task_interval": 3,
     "person_interval": 5,
-    "clear_before_person": True,
     "require_worklog": True,
     "auto_continue": True,
     "max_continue_rounds": 3,
@@ -81,6 +81,18 @@ DEFAULTS: dict[str, Any] = {
 
 _XIAOYI_WORKSPACE_ROOT = "/storage/media/100/local/files/Docs/.xiaoyi/workspace"
 _WEEKLY_WORKLOG_RELATIVE_ROOT = "memory/weekly-report-skill/worklog"
+_WEEKLY_SUMMARY_RELATIVE_ROOT = "memory/weekly-report-skill/summary"
+_MOCK_PERSON_PREFIXES = {
+    "周泽宇": "z",
+    "苏晚": "s",
+    "唐可": "t",
+    "陈景明": "c",
+    "方一诺": "f",
+}
+_MOCK_WEEK_LABELS = {
+    "第一周": 1,
+    "第二周": 2,
+}
 # Retain the old parser API for callers that import it, but the active Runner no
 # longer uses log-declared paths or Desktop fallbacks to collect artifacts.
 _VIRTUAL_OUTPUT_PATH_MAPPINGS: tuple[tuple[str, str], ...] = ()
@@ -148,10 +160,26 @@ class WeeklyTask:
 
 
 def _task_case_id(task_id: str) -> str:
-    """Return the local case name used under xiaoyi_logs/."""
-    if not task_id.isdigit():
-        raise ValueError(f"任务 ID 必须是纯数字: {task_id}")
-    return f"task{task_id}"
+    """Return a filesystem-safe metadata.absolute_id without a ``task`` prefix."""
+    if isinstance(task_id, bool) or not isinstance(task_id, (str, int)):
+        raise ValueError(f"metadata.absolute_id 必须是字符串或整数: {task_id!r}")
+    normalized = str(task_id).strip()
+    invalid_chars = '<>:"/\\|?*'
+    if (
+        not normalized
+        or normalized in {".", ".."}
+        or ".." in normalized
+        or normalized.endswith((" ", "."))
+        or any(char in normalized for char in invalid_chars)
+        or any(ord(char) < 32 for char in normalized)
+    ):
+        raise ValueError(f"不安全的 metadata.absolute_id: {task_id!r}")
+    return normalized
+
+
+def _task_sort_key(task_id: str) -> tuple[int, int | str]:
+    normalized = _task_case_id(task_id)
+    return (0, int(normalized)) if normalized.isdigit() else (1, normalized.casefold())
 
 
 @dataclass(frozen=True)
@@ -457,30 +485,48 @@ def load_weekly_config(config_path: Path) -> dict[str, Any]:
             raise ValueError(f"配置必须是 JSON 对象: {config_path}")
         config.update(loaded)
     config_dir = config_path.resolve().parent
-    for key in ("metadata_root", "deliverables_root", "scripts_root", "output_root"):
-        config[key] = _resolve_path(config_dir, str(config[key]))
+    for key in (
+        "metadata_root", "deliverables_root", "scripts_root", "mock_runner_script",
+        "output_root", "task_artifacts_root",
+    ):
+        if key in config:
+            config[key] = _resolve_path(config_dir, str(config[key]))
     return config
+
+
+def _task_directory(config: dict[str, Any], task_id: str) -> Path:
+    task_artifacts_root = config.get("task_artifacts_root")
+    if task_artifacts_root is None:
+        return Path(config["output_root"]) / _task_case_id(task_id)
+    return Path(task_artifacts_root) / _task_case_id(task_id) / "xiaoyi_file_runs"
 
 
 def discover_tasks(metadata_root: Path) -> list[WeeklyTask]:
     tasks: list[WeeklyTask] = []
+    seen_ids: dict[str, Path] = {}
     for metadata_path in metadata_root.glob("*/*/metadata.json"):
         person = metadata_path.parent.parent.name
-        task_id = metadata_path.parent.name
-        if not task_id.isdigit():
-            continue
+        source_id = metadata_path.parent.name
         metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
         if metadata.get("adapter") != "weekly-report":
             raise ValueError(f"adapter 不是 weekly-report: {metadata_path}")
         if metadata.get("person") != person:
             raise ValueError(f"person 与目录不一致: {metadata_path}")
-        if str(metadata.get("absolute_id")) != task_id:
+        if str(metadata.get("absolute_id")) != source_id:
             raise ValueError(f"absolute_id 与目录不一致: {metadata_path}")
+        task_id = _task_case_id(metadata.get("absolute_id"))
+        uniqueness_key = task_id.casefold()
+        if uniqueness_key in seen_ids:
+            raise ValueError(
+                f"metadata.absolute_id 重复: {task_id!r}; "
+                f"{seen_ids[uniqueness_key]} 与 {metadata_path}"
+            )
+        seen_ids[uniqueness_key] = metadata_path
         task_text = metadata.get("task")
         if not isinstance(task_text, str) or not task_text.strip():
             raise ValueError(f"task 为空: {metadata_path}")
         tasks.append(WeeklyTask(person, task_id, metadata_path, metadata))
-    return sorted(tasks, key=lambda item: (int(item.task_id), item.person))
+    return sorted(tasks, key=lambda item: (_task_sort_key(item.task_id), item.person))
 
 
 def _group_by_person(tasks: Iterable[WeeklyTask]) -> list[tuple[str, list[WeeklyTask]]]:
@@ -488,8 +534,8 @@ def _group_by_person(tasks: Iterable[WeeklyTask]) -> list[tuple[str, list[Weekly
     for task in tasks:
         grouped.setdefault(task.person, []).append(task)
     return sorted(
-        ((person, sorted(items, key=lambda item: int(item.task_id))) for person, items in grouped.items()),
-        key=lambda pair: int(pair[1][0].task_id),
+        ((person, sorted(items, key=lambda item: _task_sort_key(item.task_id))) for person, items in grouped.items()),
+        key=lambda pair: _task_sort_key(pair[1][0].task_id),
     )
 
 
@@ -517,34 +563,51 @@ def _helper_command(script: Path, *args: str) -> list[str]:
     return [sys.executable, "-B", str(script), *args]
 
 
-def _call_clear(config: dict[str, Any], *, target: str | None, dry_run: bool) -> None:
-    cmd = _helper_command(
-        config["scripts_root"] / "clear_person_data.py",
-        "--cal-start", str(config["calendar_start"]),
-        "--cal-end", str(config["calendar_end"]),
-        "--timeout", str(config["helper_timeout"]),
-    )
-    if target:
-        cmd.extend(["--device", target])
-    if dry_run:
-        cmd.append("--dry-run")
-    _stream_command(cmd, cwd=WORKSPACE_ROOT)
+def _resolve_mock_target(task: WeeklyTask) -> str:
+    explicit = task.metadata.get("mock_target")
+    if isinstance(explicit, str) and explicit.strip():
+        return explicit.strip().lower()
+
+    prefix = _MOCK_PERSON_PREFIXES.get(task.person)
+    if prefix is None:
+        supported = "、".join(_MOCK_PERSON_PREFIXES)
+        raise ValueError(
+            f"note 数据脚本不支持人员 {task.person!r}；当前支持：{supported}。"
+            "可在 metadata 中显式设置 mock_target。"
+        )
+
+    configured_week = task.metadata.get("mock_week")
+    week: int | None = None
+    if isinstance(configured_week, int):
+        week = configured_week
+    elif isinstance(configured_week, str) and configured_week.isdigit():
+        week = int(configured_week)
+    if week is None:
+        task_text = str(task.metadata.get("task") or "")
+        week = next(
+            (number for label, number in _MOCK_WEEK_LABELS.items() if label in task_text),
+            None,
+        )
+    if week not in {1, 2}:
+        raise ValueError(
+            f"无法为 Task {task.task_id} 解析 note 数据目标；当前脚本只声明第一周和第二周。"
+            "请在 metadata 中设置 mock_target（例如 c1 或 z2）。"
+        )
+    return f"{prefix}{week}"
 
 
-def _call_push(person: str, config: dict[str, Any], *, target: str | None,
-               dry_run: bool) -> None:
-    person_dir = config["deliverables_root"] / person
-    cmd = _helper_command(
-        config["scripts_root"] / "push_person_data.py",
-        str(person_dir),
-        "--month", str(config["month"]),
-        "--timeout", str(config["helper_timeout"]),
-    )
-    if target:
-        cmd.extend(["--device", target])
+def _call_prepare_task_data(task: WeeklyTask, config: dict[str, Any], *,
+                            dry_run: bool) -> None:
+    script = Path(config["mock_runner_script"])
+    if not script.is_file():
+        raise FileNotFoundError(f"note 清空+推送脚本不存在: {script}")
+    mock_target = _resolve_mock_target(task)
+    cmd = _helper_command(script, mock_target)
     if dry_run:
-        cmd.append("--dry-run")
-    _stream_command(cmd, cwd=WORKSPACE_ROOT)
+        print(f"[{task.task_id}] [DRY-RUN] 清空+推送: {' '.join(cmd)}")
+        return
+    print(f"[{task.task_id}] 清空并推送 note 数据: {mock_target}")
+    _stream_command(cmd, cwd=script.parent)
 
 
 def _safe_relative(remote_file: RemoteFile) -> Path:
@@ -619,13 +682,15 @@ def _remote_files_from_stat(
 
 def list_dialog_workspace_artifacts(
     dialog_id: str, *, target: str | None, verbose: bool
-) -> tuple[list[RemoteFile], list[RemoteFile]]:
-    """List only the report files and fixed weekly worklog for one dialog."""
+) -> tuple[list[RemoteFile], list[RemoteFile], list[RemoteFile]]:
+    """List report files plus the fixed weekly worklog and summary trees."""
     dialog_id = _validated_dialog_id(dialog_id)
     dialog_root = f"{_XIAOYI_WORKSPACE_ROOT}/{dialog_id}"
     worklog_root = f"{dialog_root}/{_WEEKLY_WORKLOG_RELATIVE_ROOT}"
+    summary_root = f"{dialog_root}/{_WEEKLY_SUMMARY_RELATIVE_ROOT}"
     quoted_dialog = shell_quote(dialog_root)
     quoted_worklog = shell_quote(worklog_root)
+    quoted_summary = shell_quote(summary_root)
     command = (
         f"if [ -d {quoted_dialog} ]; then "
         f"find {quoted_dialog} -mindepth 1 -maxdepth 1 -type f "
@@ -633,20 +698,27 @@ def list_dialog_workspace_artifacts(
         "echo __WORKLOG__; "
         f"if [ -d {quoted_worklog} ]; then "
         f"find {quoted_worklog} -type f -exec stat -c '%Y|%s|%n' {{}} \\;; fi; "
+        "echo __SUMMARY__; "
+        f"if [ -d {quoted_summary} ]; then "
+        f"find {quoted_summary} -type f -exec stat -c '%Y|%s|%n' {{}} \\;; fi; "
         "echo __END__"
     )
     output = remote_shell(command, target=target, timeout=90, verbose=verbose)
     before_end = output.split("__END__", 1)[0]
-    report_payload, separator, worklog_payload = before_end.partition("__WORKLOG__")
-    if not separator:
+    before_summary, summary_separator, summary_payload = before_end.partition("__SUMMARY__")
+    report_payload, worklog_separator, worklog_payload = before_summary.partition("__WORKLOG__")
+    if not worklog_separator or not summary_separator:
         raise RuntimeError(f"dialog workspace 枚举结果缺少分隔标记: {dialog_root}")
     reports = _remote_files_from_stat(
         report_payload, root_label="XiaoYiWorkspace", root_path=dialog_root
     )
     worklogs = _remote_files_from_stat(
-        worklog_payload, root_label="XiaoYiWorkspace", root_path=dialog_root
+        worklog_payload, root_label="worklog", root_path=worklog_root
     )
-    return reports, worklogs
+    summaries = _remote_files_from_stat(
+        summary_payload, root_label="summary", root_path=summary_root
+    )
+    return reports, worklogs, summaries
 
 
 def wait_for_new_stop(*, task_id: str, before: dict[str, tuple[int, int]],
@@ -701,6 +773,7 @@ def _archive_previous_attempt(task_dir: Path) -> None:
 def _write_artifact_manifest(task_dir: Path, *, task_id: str,
                              output_records: list[dict[str, Any]],
                              worklog_records: list[dict[str, Any]],
+                             summary_records: list[dict[str, Any]],
                              dialog_id: str) -> None:
     dialog_root = f"{_XIAOYI_WORKSPACE_ROOT}/{dialog_id}"
     manifest = {
@@ -711,9 +784,11 @@ def _write_artifact_manifest(task_dir: Path, *, task_id: str,
         "workspace": {
             "dialog_root": dialog_root,
             "worklog_root": f"{dialog_root}/{_WEEKLY_WORKLOG_RELATIVE_ROOT}",
+            "summary_root": f"{dialog_root}/{_WEEKLY_SUMMARY_RELATIVE_ROOT}",
         },
         "outputs": output_records,
         "worklogs": worklog_records,
+        "summaries": summary_records,
     }
     (task_dir / "artifacts_manifest.json").write_text(
         json.dumps(manifest, ensure_ascii=False, indent=2), encoding="utf-8"
@@ -776,51 +851,63 @@ def _collect_task_artifacts(
     target: str | None,
     verbose: bool,
     dialog_id: str,
-) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
-    """Pull reports and worklogs only from this dialog's fixed workspace paths."""
-    report_files, worklog_files = list_dialog_workspace_artifacts(
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]], list[dict[str, Any]]]:
+    """Pull reports, worklogs, and summaries from fixed dialog workspace paths."""
+    report_files, worklog_files, summary_files = list_dialog_workspace_artifacts(
         dialog_id, target=target, verbose=verbose
     )
     output_records = pull_remote_files(
         report_files, local_root=task_dir / "outputs", target=target, verbose=verbose
     )
     worklog_records = pull_remote_files(
-        worklog_files, local_root=task_dir / "outputs", target=target, verbose=verbose
+        worklog_files, local_root=task_dir, target=target, verbose=verbose
+    )
+    summary_records = pull_remote_files(
+        summary_files, local_root=task_dir, target=target, verbose=verbose
     )
     for record in output_records:
         record["selection_source"] = "dialog-workspace-root"
     for record in worklog_records:
         record["selection_source"] = "dialog-weekly-worklog"
+    for record in summary_records:
+        record["selection_source"] = "dialog-weekly-summary"
     _write_artifact_manifest(
         task_dir,
         task_id=task_id,
         output_records=output_records,
         worklog_records=worklog_records,
+        summary_records=summary_records,
         dialog_id=dialog_id,
     )
-    return output_records, worklog_records
+    return output_records, worklog_records, summary_records
 
 
 def run_weekly_task(task: WeeklyTask, config: dict[str, Any], *, target: str | None,
                     verbose: bool, dry_run: bool, rerun: bool) -> bool:
-    output_root: Path = config["output_root"]
     case_id = _task_case_id(task.task_id)
-    task_dir = output_root / case_id
+    task_dir = _task_directory(config, task.task_id)
+    run_dir = task_dir.parent
     execution_prompt = _build_execution_prompt(task.metadata["task"], config.get("prompt_suffix"))
-    if not rerun and is_case_completed(case_id, str(output_root)):
+    if not rerun and is_case_completed(case_id, str(run_dir), case_dir=str(task_dir)):
         print(f"[{task.task_id}] 已完成，跳过")
         return True
 
     print(f"\n{'=' * 70}\n[{task.task_id}] {task.person}: {task.metadata['task']}\n{'=' * 70}")
     if dry_run:
         print(f"[{task.task_id}] [DRY-RUN] execution prompt:\n{execution_prompt}")
-        print(f"[{task.task_id}] [DRY-RUN] 将监控并拉取 Trace，再按 dialog workspace 拉取周报/worklog")
+        print(f"[{task.task_id}] [DRY-RUN] 将监控并拉取 Trace，再按 dialog workspace 拉取周报/worklog/summary")
         return True
 
     task_dir.mkdir(parents=True, exist_ok=True)
     _archive_previous_attempt(task_dir)
     shutil.copy2(task.metadata_path, task_dir / "metadata.json")
-    save_prompt_text(execution_prompt, case_id=case_id, run_dir=str(output_root), tag="prompt")
+    save_prompt_text(
+        execution_prompt,
+        case_id=case_id,
+        run_dir=str(run_dir),
+        tag="prompt",
+        task_dir=task_dir,
+    )
 
     before_logs = snapshot(list_remote_logs(target=target, user_id=None, date_id=today_id(), verbose=verbose))
     active_before = before_logs
@@ -831,6 +918,7 @@ def run_weekly_task(task: WeeklyTask, config: dict[str, Any], *, target: str | N
     interrupted = False
     output_records: list[dict[str, Any]] = []
     worklog_records: list[dict[str, Any]] = []
+    summary_records: list[dict[str, Any]] = []
     artifacts_collected = False
     dialog_page_id = ""
     continue_queries: list[str] = []
@@ -860,11 +948,14 @@ def run_weekly_task(task: WeeklyTask, config: dict[str, Any], *, target: str | N
             local_log = pull_log(
                 done_log,
                 case_id=case_id,
-                run_dir=str(output_root),
+                run_dir=str(run_dir),
                 target=target,
                 verbose=verbose,
+                task_dir=task_dir,
             )
-            stop_content = extract_stop_content(local_log, case_id, output_root)
+            stop_content = extract_stop_content(
+                local_log, case_id, run_dir, task_dir=task_dir
+            )
             if not dialog_page_id:
                 print(f"[{task.task_id}] 获取当前对话 dialogPageId...")
                 dialog_page_id = get_latest_dialog_page_id(
@@ -917,8 +1008,9 @@ def run_weekly_task(task: WeeklyTask, config: dict[str, Any], *, target: str | N
             save_prompt_text(
                 continue_query,
                 case_id=case_id,
-                run_dir=str(output_root),
+                run_dir=str(run_dir),
                 tag=f"continue{next_round}",
+                task_dir=task_dir,
             )
             _save_dialog_state(
                 task_dir,
@@ -944,7 +1036,7 @@ def run_weekly_task(task: WeeklyTask, config: dict[str, Any], *, target: str | N
             round_number = next_round
 
         if dialog_page_id:
-            output_records, worklog_records = _collect_task_artifacts(
+            output_records, worklog_records, summary_records = _collect_task_artifacts(
                 task_dir,
                 task_id=task.task_id,
                 target=target,
@@ -975,8 +1067,15 @@ def run_weekly_task(task: WeeklyTask, config: dict[str, Any], *, target: str | N
             done_log = None
     if local_log is None and done_log is not None:
         try:
-            local_log = pull_log(done_log, case_id=case_id, run_dir=str(output_root), target=target, verbose=verbose)
-            extract_stop_content(local_log, case_id, output_root)
+            local_log = pull_log(
+                done_log,
+                case_id=case_id,
+                run_dir=str(run_dir),
+                target=target,
+                verbose=verbose,
+                task_dir=task_dir,
+            )
+            extract_stop_content(local_log, case_id, run_dir, task_dir=task_dir)
         except Exception as exc:
             failure = failure or f"日志拉取失败: {exc}"
 
@@ -984,7 +1083,7 @@ def run_weekly_task(task: WeeklyTask, config: dict[str, Any], *, target: str | N
         try:
             if not dialog_page_id:
                 raise RuntimeError("没有 dialogPageId，无法定位对话 workspace")
-            output_records, worklog_records = _collect_task_artifacts(
+            output_records, worklog_records, summary_records = _collect_task_artifacts(
                 task_dir,
                 task_id=task.task_id,
                 target=target,
@@ -995,7 +1094,11 @@ def run_weekly_task(task: WeeklyTask, config: dict[str, Any], *, target: str | N
         except Exception as exc:
             failure = failure or f"产物拉取失败: {exc}"
 
-    failed_pulls = [item for item in output_records + worklog_records if item.get("status") != "pulled"]
+    failed_pulls = [
+        item
+        for item in output_records + worklog_records + summary_records
+        if item.get("status") != "pulled"
+    ]
     if failed_pulls:
         failure = failure or f"{len(failed_pulls)} 个远端产物拉取失败"
     if not output_records:
@@ -1018,6 +1121,7 @@ def run_weekly_task(task: WeeklyTask, config: dict[str, Any], *, target: str | N
         "present_formats": sorted(present_formats),
         "outputs_pulled": sum(1 for item in output_records if item.get("status") == "pulled"),
         "worklogs_pulled": sum(1 for item in worklog_records if item.get("status") == "pulled"),
+        "summaries_pulled": sum(1 for item in summary_records if item.get("status") == "pulled"),
         "dialog_rounds": round_number + 1,
         "pushes": 1 + len(continue_queries),
         "dialog_verdict": dialog_verdict,
@@ -1026,20 +1130,25 @@ def run_weekly_task(task: WeeklyTask, config: dict[str, Any], *, target: str | N
         "warnings": runner_warnings,
     }
     if interrupted:
-        mark_case_interrupted(case_id, str(output_root))
+        mark_case_interrupted(case_id, str(run_dir), case_dir=str(task_dir))
         raise KeyboardInterrupt
     if failure:
-        mark_case_failed(case_id, str(output_root), failure)
+        mark_case_failed(case_id, str(run_dir), failure, case_dir=str(task_dir))
         print(f"[{task.task_id}] FAILED: {failure}", file=sys.stderr)
         return False
-    mark_case_completed(case_id, str(output_root), result=result)
-    print(f"[{task.task_id}] 完成: outputs={result['outputs_pulled']} worklogs={result['worklogs_pulled']}")
+    mark_case_completed(
+        case_id, str(run_dir), result=result, case_dir=str(task_dir)
+    )
+    print(
+        f"[{task.task_id}] 完成: outputs={result['outputs_pulled']} "
+        f"worklogs={result['worklogs_pulled']} summaries={result['summaries_pulled']}"
+    )
     return True
 
 
-def _task_handoff_entry(task: WeeklyTask, output_root: Path) -> dict[str, Any]:
+def _task_handoff_entry(task: WeeklyTask, config: dict[str, Any]) -> dict[str, Any]:
     case_id = _task_case_id(task.task_id)
-    task_dir = output_root / case_id
+    task_dir = _task_directory(config, task.task_id)
     marker_names = (
         ("interrupted.json", "interrupted"),
         ("failed.json", "failed"),
@@ -1112,7 +1221,7 @@ def write_weekly_runner_handoff(
 ) -> Path:
     output_root: Path = config["output_root"]
     handoff_path = output_root / "weekly_runner_batch.json"
-    entries = [_task_handoff_entry(task, output_root) for task in tasks]
+    entries = [_task_handoff_entry(task, config) for task in tasks]
     effective_runner_finished = runner_finished and _handoff_inputs_ready(entries)
     payload = {
         "version": 1,
@@ -1124,6 +1233,11 @@ def write_weekly_runner_handoff(
             "metadata": str(Path(config["metadata_root"]).resolve()),
             "deliverables": str(Path(config["deliverables_root"]).resolve()),
             "logs": str(output_root.resolve()),
+            "taskArtifacts": (
+                str(Path(config["task_artifacts_root"]).resolve())
+                if config.get("task_artifacts_root") is not None
+                else None
+            ),
         },
         "taskIds": [task.task_id for task in tasks],
         "tasks": entries,
@@ -1138,10 +1252,13 @@ def run_person(person: str, tasks: list[WeeklyTask], config: dict[str, Any], *,
                stop_on_error: bool, skip_push: bool,
                skip_clear: bool, skip_initial_clear: bool,
                clear_on_interrupt: bool) -> tuple[int, int, bool, bool]:
-    output_root: Path = config["output_root"]
     pending = tasks if rerun else [
         task for task in tasks
-        if not is_case_completed(_task_case_id(task.task_id), str(output_root))
+        if not is_case_completed(
+            _task_case_id(task.task_id),
+            str(_task_directory(config, task.task_id).parent),
+            case_dir=str(_task_directory(config, task.task_id)),
+        )
     ]
     if not pending:
         print(f"[{person}] 任务均已完成，跳过该人员的数据推送与清理")
@@ -1152,15 +1269,30 @@ def run_person(person: str, tasks: list[WeeklyTask], config: dict[str, Any], *,
     success_count = 0
     fail_count = 0
     lifecycle_error: str | None = None
-    cleanup_succeeded = False
+    if skip_push or skip_clear or skip_initial_clear or clear_on_interrupt:
+        raise ValueError(
+            "note 数据脚本将清空和推送作为一个原子准备步骤；旧的 skip-clear/skip-push/"
+            "skip-initial-clear/clear-on-interrupt 选项不再支持"
+        )
     try:
-        if config.get("clear_before_person") and not skip_initial_clear:
-            print(f"[{person}] 推送前清理设备，确保人员数据隔离")
-            _call_clear(config, target=target, dry_run=dry_run)
-        if not skip_push:
-            _call_push(person, config, target=target, dry_run=dry_run)
         for index, task in enumerate(pending, 1):
             print(f"[{person}] 任务进度 {index}/{len(pending)}")
+            try:
+                _call_prepare_task_data(task, config, dry_run=dry_run)
+            except Exception as exc:
+                error = f"note 数据清空+推送失败: {exc}"
+                if not dry_run:
+                    mark_case_failed(
+                        _task_case_id(task.task_id),
+                        str(_task_directory(config, task.task_id).parent),
+                        error,
+                        case_dir=str(_task_directory(config, task.task_id)),
+                    )
+                print(f"[{task.task_id}] FAILED: {error}", file=sys.stderr)
+                fail_count += 1
+                if stop_on_error:
+                    break
+                continue
             ok = run_weekly_task(task, config, target=target, verbose=verbose, dry_run=dry_run, rerun=rerun)
             if ok:
                 success_count += 1
@@ -1177,28 +1309,13 @@ def run_person(person: str, tasks: list[WeeklyTask], config: dict[str, Any], *,
         lifecycle_error = str(exc)
         print(f"[{person}] 人员流程失败: {exc}", file=sys.stderr)
 
-    if not interrupted:
-        if not skip_clear:
-            try:
-                _call_clear(config, target=target, dry_run=dry_run)
-                cleanup_succeeded = True
-            except Exception as exc:
-                lifecycle_error = lifecycle_error or f"人员数据清理失败: {exc}"
-                print(f"[{person}] {lifecycle_error}", file=sys.stderr)
-    elif clear_on_interrupt and not skip_clear:
-        try:
-            _call_clear(config, target=target, dry_run=dry_run)
-            cleanup_succeeded = True
-        except Exception as exc:
-            lifecycle_error = f"中断后清理失败: {exc}"
-
     if interrupted:
         raise KeyboardInterrupt
     return (
         success_count,
         fail_count + (1 if lifecycle_error else 0),
         bool(lifecycle_error),
-        cleanup_succeeded,
+        False,
     )
 
 
@@ -1269,12 +1386,15 @@ def main(argv: list[str] | None = None) -> int:
 
     total_success = 0
     total_failed = 0
-    device_clean = False
     stopped_before_lifecycle = False
     try:
         for person_index, (person, person_tasks) in enumerate(grouped):
             has_pending = args.rerun or any(
-                not is_case_completed(_task_case_id(task.task_id), str(output_root))
+                not is_case_completed(
+                    _task_case_id(task.task_id),
+                    str(_task_directory(config, task.task_id).parent),
+                    case_dir=str(_task_directory(config, task.task_id)),
+                )
                 for task in person_tasks
             )
             if not has_pending:
@@ -1285,11 +1405,7 @@ def main(argv: list[str] | None = None) -> int:
                 force_stop(target=target, verbose=args.verbose)
                 stopped_before_lifecycle = True
 
-            skip_initial_clear = args.skip_initial_clear or device_clean
-            if device_clean and not args.skip_initial_clear:
-                print(f"[{person}] 上一人员结束后已清理，跳过重复的推送前清理")
-
-            success, failed, lifecycle_failed, cleanup_succeeded = run_person(
+            success, failed, lifecycle_failed, _cleanup_succeeded = run_person(
                 person,
                 person_tasks,
                 config,
@@ -1300,12 +1416,11 @@ def main(argv: list[str] | None = None) -> int:
                 stop_on_error=args.stop_on_error,
                 skip_push=args.skip_push,
                 skip_clear=args.skip_clear,
-                skip_initial_clear=skip_initial_clear,
+                skip_initial_clear=args.skip_initial_clear,
                 clear_on_interrupt=args.clear_on_interrupt,
             )
             total_success += success
             total_failed += failed
-            device_clean = cleanup_succeeded
             if args.stop_on_error and (failed or lifecycle_failed):
                 break
             if person_index < len(grouped) - 1 and float(config["person_interval"]) > 0 and not args.dry_run:

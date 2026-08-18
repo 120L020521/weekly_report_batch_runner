@@ -2,23 +2,25 @@
 name: xiaoyi-weekly-report
 description: >-
   Run HarmonyOS XiaoYi weekly-report and daily-report batches from external
-  per-person deliverables_final data and numeric metadata.json tasks marked
-  adapter: weekly-report. Use for report generation Runner execution that must push
-  each person's files, calendar, and memos once; execute that person's selected
-  tasks serially; automatically continue the same XiaoYi dialog through
-  confirmation, choice, or retry stops; pull reports and worklogs only from the
+  metadata.json tasks marked adapter: weekly-report and the repository's
+  note/data_yangshi mock datasets. Use for report generation Runner execution
+  that must invoke note/data_yangshi/jiaoben/run_data_mock.py before every Task,
+  atomically clear and push that Task's data, execute selected tasks serially,
+  automatically continue the same XiaoYi dialog through
+  confirmation, choice, or retry stops; pull reports, worklogs, and summaries only from the
   current dialog's fixed XiaoYi workspace; preserve the original Trace pull;
-  and clear the device before the next person. All executable
-  code and default configuration are bundled in this Skill; task and deliverable
-  data remain external. Return a deterministic batch handoff that a parent
+  without a second cleanup after pulling. Runtime execution code is bundled in
+  this Skill; mock preparation is delegated to the repository note scripts.
+  Return a deterministic batch handoff that a parent
   run-xiaoyi coordinator can pass to the shared Judge and HALO skills.
 ---
 
 # Run XiaoYi Weekly Reports
 
 Use `scripts/run_weekly.py` as the only launcher. It owns HDC interaction,
-prompt submission, JSONL monitoring, artifact pulling, and person-data lifecycle.
-Do not reproduce those steps manually.
+prompt submission, JSONL monitoring, artifact pulling, and Task lifecycle; it
+delegates device data cleanup and push to the note script. Do not reproduce
+those steps manually.
 
 ## Resolve external data
 
@@ -30,32 +32,44 @@ Resolve `<data_root>` to a user-supplied directory containing:
 │   └── <person>/
 └── task/
     └── <person>/
-        └── <numeric_id>/metadata.json
+        └── <absolute_id>/metadata.json
 ```
 
 Do not require `xiaoyi_batch_runner/` or a project-level `scripts/` directory.
 All runtime scripts and default settings are inside this Skill. Keep
-`deliverables_final/`, `task/`, and generated `xiaoyi_logs/` outside the Skill.
+`deliverables_final/`, `task/`, and generated Task/batch artifact directories
+outside the Skill.
 
 Require every selected `metadata.json` to contain:
 
 - `adapter` equal to `weekly-report`;
 - `person` equal to the containing person directory;
-- `absolute_id` equal to the numeric Task directory;
+- a path-safe, globally unique string or integer `absolute_id` equal to the Task
+  directory name; do not require it to be numeric;
 - a non-empty `task` string;
 - a non-empty string list in `rubrics`.
 
 Reject `FileOrganization_*`, setup/expect/source datasets, and generic numeric
 WorkspaceBench metadata without `adapter: weekly-report`.
 
-## Preserve the person lifecycle
+## Preserve the Task lifecycle
 
 Execute people and Tasks strictly serially on one device. Before the first active
-person, force-stop XiaoYi once, clear the configured calendar range, memos,
-Desktop, Documents, and Download, then push that person's data. For each person:
+Task, force-stop XiaoYi once. For every pending Task, preserve this exact order:
 
-1. Push that person's files, calendar, and memos exactly once.
-2. Run selected Tasks in numeric order without clearing or re-pushing between Tasks.
+```text
+note 清空+推送 -> 执行小艺任务 -> 拉取 Trace/周报/worklog/summary
+```
+
+1. Resolve `metadata.mock_target` when supplied. Otherwise map the supported
+   people (`周泽宇/苏晚/唐可/陈景明/方一诺`) and `第一周/第二周` in
+   `metadata.task` to the note script's `z1..f2` target. Reject unsupported or
+   ambiguous data instead of falling back to legacy push helpers.
+2. Invoke `<repo>/note/data_yangshi/jiaoben/run_data_mock.py <target>` exactly
+   once. It runs `change_file.py` and `make_data.py`; `make_data.py` clears stale
+   device/mock workspace data and pushes the selected files and mock responses.
+   Never call bundled `clear_person_data.py` or `push_person_data.py` in the
+   normal workflow.
 3. Send `metadata.task` as the XiaoYi prompt by default. Do not append a desktop
    output instruction during normal runs. Use `prompt_suffix` only as an explicit
    compatibility override when the user asks for it.
@@ -71,42 +85,43 @@ Desktop, Documents, and Download, then push that person's data. For each person:
    `history_retry_delay_seconds`. Save the latest `dialogPageId`, and resume the same
    dialog with `pc_agent_task_start + historySessionId`. Send an affirmative reply
    that preserves the original time range, content, and output format. Allow at
-   most three continuation pushes by default; never clear, re-push person data,
-   or force-stop XiaoYi between dialog rounds.
+   most three continuation pushes by default; never invoke the note script or
+   force-stop XiaoYi between dialog rounds.
 5. Preserve the existing JSONL flow unchanged: snapshot the pre-Task log baseline,
    wait for a new `stop_reason=stop`, and pull the selected raw Trace to
-   `<output_root>/task<numeric_id>/task<numeric_id>.jsonl` after each round.
-   Trace content no longer selects report/worklog paths.
+   `<agent_workspace>/<absolute_id>/xiaoyi_file_runs/<absolute_id>.jsonl`
+   after each round.
+   Trace content no longer selects report/worklog/summary paths.
 6. After the final dialog verdict, use only these HDC-visible paths:
 
    ```text
    /storage/media/100/local/files/Docs/.xiaoyi/workspace/<dialogPageId>/
    /storage/media/100/local/files/Docs/.xiaoyi/workspace/<dialogPageId>/memory/weekly-report-skill/worklog/
+   /storage/media/100/local/files/Docs/.xiaoyi/workspace/<dialogPageId>/memory/weekly-report-skill/summary/
    ```
 
-   Pull direct files from the first path as generated reports. Recursively pull
-   concrete files from the second path as worklog. Preserve both beneath
-   `<output_root>/task<numeric_id>/outputs/XiaoYiWorkspace/`. Do not inspect or
+   Pull direct files from the first path as generated reports beneath
+   `<agent_workspace>/<absolute_id>/xiaoyi_file_runs/outputs/XiaoYiWorkspace/`.
+   Recursively pull concrete files from the second and third paths beneath the separate
+   `<agent_workspace>/<absolute_id>/xiaoyi_file_runs/worklog/` and
+   `<agent_workspace>/<absolute_id>/xiaoyi_file_runs/summary/` directories.
+   Do not inspect or
    pull Desktop, Documents, Download, calendar, memo, source-data mirrors,
    log-declared artifact paths, or any other workspace directory.
-7. After the Task reaches a final dialog verdict and its Trace, report, and
-   worklog are safely local, force-stop XiaoYi exactly
-   once. Start the next Task through `PCAgentTaskAbility`; do not clear or push
-   again when it belongs to the same person.
-8. Clear the person's device data before continuing to the next person. Run all
-   clear and subsequent push calls to `BatchToolExecuteAbility` with
-   `--keep-app-running`; never force-stop between those lifecycle substeps.
-9. When the previous person's final clear succeeded, skip the next person's
-   initial clear and push the next data directly. Retry the initial clear only
-   when the previous cleanup failed.
+7. After the Task reaches a final dialog verdict and its Trace, report, worklog,
+   and any available summary are safely local, force-stop XiaoYi exactly once. Do not run a
+   separate cleanup after pulling. The next pending Task starts with a new note
+   cleanup-and-push step.
 
 Never parallelize people or Tasks. Require a JSONL baseline and a non-empty,
 path-safe `dialogPageId`. Do not take a full Desktop, Documents, or Download
 snapshot and do not fall back to them. Fail the Task when its fixed dialog
 workspace has no direct report file, its required worklog directory has no pulled
 file, or the dialog ID cannot be resolved. Require at least one pulled worklog file.
-Do not explicitly relaunch XiaoYi between lifecycle substeps. Starting the next
-Task through `PCAgentTaskAbility` is the relaunch point.
+The summary directory is optional: an absent or empty directory does not fail the Task,
+but fail when a discovered summary file cannot be pulled.
+Do not explicitly relaunch XiaoYi between lifecycle substeps. Starting the Task
+through `PCAgentTaskAbility` is the relaunch point after note preparation.
 
 Automatic continuation is enabled by `auto_continue: true`; keep it enabled for
 normal runs. `max_continue_rounds` defaults to `3`, giving four pushes total
@@ -139,8 +154,10 @@ Run a selected batch:
 ```powershell
 & <python> -B "<skill_root>\scripts\run_weekly.py" `
   --project-root "<data_root>" `
+  --output-root "<batch_dir>" `
+  --task-artifacts-root "<agent_workspace>" `
   --person "<person>" `
-  --task "<numeric_id>"
+  --task "<absolute_id>"
 ```
 
 Repeat `--person` and `--task` as required. Omit both only when the user explicitly
@@ -152,17 +169,20 @@ Use separate data paths only when the directories do not share one root:
 & <python> -B "<skill_root>\scripts\run_weekly.py" `
   --metadata-root "<task_dir>" `
   --deliverables-root "<deliverables_dir>" `
-  --output-root "<logs_dir>" `
-  --person "<person>" --task "<numeric_id>"
+  --output-root "<batch_dir>" `
+  --task-artifacts-root "<agent_workspace>" `
+  --person "<person>" --task "<absolute_id>"
 ```
 
-Use `--config <json>` only to override runtime settings such as month, calendar
-range, timeouts, intervals, or optional prompt suffix. The launcher
-always replaces `scripts_root` with its bundled runtime and CLI data paths take
-precedence over config paths.
+Use `--config <json>` only to override runtime settings such as timeouts,
+intervals, optional prompt suffix, or `mock_runner_script`. The launcher always
+replaces `scripts_root` with its bundled runtime, defaults `mock_runner_script`
+to the current repository's `note/data_yangshi/jiaoben/run_data_mock.py`, and
+gives CLI data paths precedence over config paths.
 
-Use `--dry-run` for a no-HDC lifecycle preview. Do not pass `--skip-clear`,
-`--skip-push`, or `--skip-initial-clear` during a normal run.
+Use `--dry-run` for a no-HDC lifecycle preview. Legacy `--skip-clear`,
+`--skip-push`, `--skip-initial-clear`, and `--clear-on-interrupt` options are
+rejected because the note script owns cleanup and push as one atomic step.
 Do not use `--rerun` unless the user explicitly requests replacement. Treat the
 runner as a long-running quiet process; wait on the same process and never relaunch
 it merely because output is quiet.
@@ -178,28 +198,32 @@ the handoff and state that downstream stages require `run-xiaoyi`.
 After a normal batch, require:
 
 ```text
-<output_root>/weekly_runner_batch.json
+<batch_dir>/weekly_runner_batch.json
 ```
 
-Store each Task's Runner evidence in one prefixed directory:
+Store each Task's Runner evidence under its exact `metadata.absolute_id`; never
+add a `task` prefix and never use `metadata.id`:
 
 ```text
-<output_root>/task<numeric_id>/
-├── task<numeric_id>.jsonl
-├── task<numeric_id>.meta.json
-├── task<numeric_id>.prompt.txt
-├── task<numeric_id>.continue1.txt ... task<numeric_id>.continue3.txt (when used)
-├── task<numeric_id>.content.txt
+<agent_workspace>/<absolute_id>/xiaoyi_file_runs/
+├── <absolute_id>.jsonl
+├── <absolute_id>.meta.json
+├── <absolute_id>.prompt.txt
+├── <absolute_id>.continue1.txt ... <absolute_id>.continue3.txt (when used)
+├── <absolute_id>.content.txt
 ├── metadata.json
 ├── artifacts_manifest.json
 ├── completed.json | failed.json | interrupted.json
-└── outputs/
+├── outputs/                # generated reports; Judge input
+├── worklog/                # user-facing only; never Judge input
+└── summary/                # user-facing only; never Judge input
 ```
 
 Do not create `.run`, `_runs`, `run_<date>`, lifecycle, or person-result files.
 Do not create batch-level lifecycle or HDC command logs. Stream helper-process and
 HDC diagnostics to the invoking console only. The only batch-level file created by
-Runner is `weekly_runner_batch.json`; per-Task evidence remains under `task<ID>/`.
+Runner is `<batch_dir>/weekly_runner_batch.json`; per-Task evidence remains below
+each Task's `xiaoyi_file_runs/`.
 
 For every selected Task, require the handoff entry to include these exact Judge
 inputs after artifact collection has completed:
@@ -207,9 +231,13 @@ inputs after artifact collection has completed:
 ```text
 judgeInputs.metadata      = <metadata_root>/<person>/<ID>/metadata.json
 judgeInputs.data          = null
-judgeInputs.outputs       = <output_root>/task<ID>/outputs
-judgeInputs.runnerTaskDir = <output_root>/task<ID>
+judgeInputs.outputs       = <agent_workspace>/<absolute_id>/xiaoyi_file_runs/outputs
+judgeInputs.runnerTaskDir = <agent_workspace>/<absolute_id>/xiaoyi_file_runs
 ```
+
+Keep `worklog/` and `summary/` outside `judgeInputs.outputs`. The weekly Judge must not copy,
+read, or score these user-facing files. `runnerTaskDir` and Trace remain handoff evidence
+for orchestration and HALO, not weekly Judge evaluator evidence.
 
 Write `runnerFinished = true` only after every selected person's Tasks and
 cleanup lifecycle has returned. A parent coordinator must not start Judge before
@@ -220,10 +248,10 @@ selected Task appears exactly once. Return the handoff path and one row per Task
 with person, Task ID, Runner outcome, Trace path, and outputs directory. Use the
 handoff outcome and Task marker rather than process exit alone to determine success.
 Record a non-fatal history/continuation issue under `completed.json.result.warnings`
-and `task<ID>.meta.json.runner_warnings`; do not create `failed.json` for that issue
+and `<absolute_id>.meta.json.runner_warnings`; do not create `failed.json` for that issue
 when the required Runner evidence was collected successfully.
 
 Treat `weekly_runner_batch.json` as the only downstream interface. A Judge or
 HALO coordinator must consume the exact paths recorded there; it must not rediscover
-Tasks by scanning `xiaoyi_logs`, rerun XiaoYi, or infer one person's evidence from
+Tasks by scanning old Runner roots, rerun XiaoYi, or infer one person's evidence from
 another person's directory.

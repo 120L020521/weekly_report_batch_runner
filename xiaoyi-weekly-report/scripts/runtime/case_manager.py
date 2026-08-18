@@ -10,21 +10,27 @@ import os
 from datetime import datetime
 
 
+def _case_output(case_id: str, run_dir: str, case_dir: str | None = None) -> str:
+    return case_dir if case_dir is not None else os.path.join(run_dir, case_id)
+
+
 def load_config(config_path: str) -> dict:
     """加载配置文件"""
     with open(config_path, 'r', encoding='utf-8') as f:
         return json.load(f)
 
 
-def is_case_completed(case_id: str, run_dir: str) -> bool:
+def is_case_completed(case_id: str, run_dir: str, *, case_dir: str | None = None) -> bool:
     """检查case是否已完成"""
-    marker = os.path.join(run_dir, case_id, 'completed.json')
+    marker = os.path.join(_case_output(case_id, run_dir, case_dir), 'completed.json')
     return os.path.exists(marker)
 
 
-def mark_case_completed(case_id: str, run_dir: str, result: dict = None) -> None:
+def mark_case_completed(
+    case_id: str, run_dir: str, result: dict = None, *, case_dir: str | None = None
+) -> None:
     """标记case完成"""
-    case_output = os.path.join(run_dir, case_id)
+    case_output = _case_output(case_id, run_dir, case_dir)
     os.makedirs(case_output, exist_ok=True)
 
     marker = {
@@ -37,9 +43,11 @@ def mark_case_completed(case_id: str, run_dir: str, result: dict = None) -> None
         json.dump(marker, f, indent=2, ensure_ascii=False)
 
 
-def mark_case_failed(case_id: str, run_dir: str, error: str) -> None:
+def mark_case_failed(
+    case_id: str, run_dir: str, error: str, *, case_dir: str | None = None
+) -> None:
     """标记case失败"""
-    case_output = os.path.join(run_dir, case_id)
+    case_output = _case_output(case_id, run_dir, case_dir)
     os.makedirs(case_output, exist_ok=True)
 
     marker = {
@@ -52,9 +60,11 @@ def mark_case_failed(case_id: str, run_dir: str, error: str) -> None:
         json.dump(marker, f, indent=2, ensure_ascii=False)
 
 
-def mark_case_interrupted(case_id: str, run_dir: str) -> None:
+def mark_case_interrupted(
+    case_id: str, run_dir: str, *, case_dir: str | None = None
+) -> None:
     """标记case手动退出"""
-    case_output = os.path.join(run_dir, case_id)
+    case_output = _case_output(case_id, run_dir, case_dir)
     os.makedirs(case_output, exist_ok=True)
 
     marker = {
