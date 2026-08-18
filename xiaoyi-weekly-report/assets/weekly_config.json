@@ -18,9 +18,5 @@
   "history_initial_wait_seconds": 8,
   "history_max_retries": 6,
   "history_retry_delay_seconds": 5,
-  "prompt_suffix": "",
-  "remote_output_roots": {
-    "Desktop": "/storage/media/100/local/files/Docs/Desktop",
-    "XiaoYiWorkspace": "/storage/Users/currentUser/.xiaoyi/workspace"
-  }
+  "prompt_suffix": ""
 }

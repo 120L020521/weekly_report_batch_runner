@@ -143,6 +143,81 @@ class UnifiedJudgeBatchTests(unittest.TestCase):
             self.assertEqual(result.returncode, 2)
             self.assertIn("runner_finished", result.stderr)
 
+    def test_file_organization_judges_ready_snapshot_despite_failed_runner_outcome(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            judge_root = root / "judge"
+            case_id = "FileOrganization_0_002"
+            source = root / "source" / case_id
+            metadata_path = source / "metadata.json"
+            write_json(metadata_path, {
+                "absolute_id": case_id,
+                "task": "organize files",
+                "rubrics": ["expected directory structure"],
+            })
+            outputs = source / "outputs"
+            for name in ("Desktop", "Download", "Documents"):
+                (outputs / name).mkdir(parents=True)
+            trace = source / f"{case_id}.jsonl"
+            trace.write_text('{"trace_id":"t","span_id":"s"}\n', encoding="utf-8")
+            batch_path = root / "judge_batch.json"
+            write_json(batch_path, {
+                "schema_version": 1,
+                "producer": "run-xiaoyi",
+                "runner_finished": True,
+                "run_id": "test-file-run",
+                "judge_root": str(judge_root.resolve()),
+                "tasks": [
+                    {
+                        "task_id": case_id,
+                        "adapter": "file-organization",
+                        "runner_status": "failed",
+                        "execution_outcome": "incomplete-after-3-continues",
+                        "evidence_ready": True,
+                        "metadata": str(metadata_path.resolve()),
+                        "data": None,
+                        "outputs": str(outputs.resolve()),
+                        "runner_dir": str(source.resolve()),
+                        "trace": str(trace.resolve()),
+                        "judge_dir": str((judge_root / case_id).resolve()),
+                    },
+                    {
+                        "task_id": "FileOrganization_0_003",
+                        "adapter": "file-organization",
+                        "runner_status": "failed",
+                        "execution_outcome": "execution-error",
+                        "evidence_ready": False,
+                        "metadata": None,
+                        "data": None,
+                        "outputs": None,
+                        "runner_dir": None,
+                        "trace": None,
+                        "judge_dir": str((judge_root / "FileOrganization_0_003").resolve()),
+                    },
+                ],
+            })
+
+            prepared = self.run_cli("prepare", "--batch", batch_path)
+            self.assertEqual(prepared.returncode, 0, prepared.stderr)
+            queue = json.loads((judge_root / "judge_queue.json").read_text(encoding="utf-8"))
+            ready, unavailable = queue["tasks"]
+            self.assertEqual(ready["status"], "ready")
+            self.assertEqual(ready["runnerStatus"], "failed")
+            self.assertEqual(ready["executionOutcome"], "incomplete-after-3-continues")
+            self.assertIs(ready["evidenceReady"], True)
+            self.assertEqual(ready["trace"], str(trace.resolve()))
+            manifest = json.loads(
+                (Path(ready["preparedDir"]) / "case_manifest.json").read_text(encoding="utf-8")
+            )
+            self.assertEqual(manifest["runnerStatus"], "failed")
+            self.assertEqual(manifest["executionOutcome"], "incomplete-after-3-continues")
+            self.assertIs(manifest["evidenceReady"], True)
+
+            self.assertEqual(unavailable["status"], "runner-failure")
+            self.assertEqual(unavailable["executionOutcome"], "execution-error")
+            self.assertIs(unavailable["evidenceReady"], False)
+            self.assertIn("evidence is not ready", unavailable["error"])
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -57,6 +57,8 @@ class BatchReportTests(unittest.TestCase):
                     "taskId": task_id,
                     "adapter": adapter,
                     "runnerStatus": "completed",
+                    "executionOutcome": "complete" if adapter == "file-organization" else "completed",
+                    "evidenceReady": True,
                     "metadata": str((prepared / "metadata.json").resolve()),
                     "trace": str(trace.resolve()),
                     "preparedDir": str(prepared.resolve()),
@@ -83,6 +85,8 @@ class BatchReportTests(unittest.TestCase):
             document = html.read_text(encoding="utf-8")
             self.assertIn('"task_id":"21"', document)
             self.assertIn('"adapter":"file-organization"', document)
+            self.assertIn('"execution_outcome":"complete"', document)
+            self.assertIn('"evidence_ready":true', document)
             self.assertNotIn('"handoff":', document)
 
 

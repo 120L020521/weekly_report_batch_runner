@@ -219,6 +219,19 @@ def _validate_entry_shape(entry: dict[str, Any], judge_root: Path) -> dict[str, 
     runner_status = entry.get("runner_status")
     if runner_status not in RUNNER_STATUSES:
         raise JudgeBatchError(f"task {task_id} runner_status is unsupported: {runner_status!r}")
+    execution_outcome = entry.get("execution_outcome")
+    if execution_outcome is not None and (
+        not isinstance(execution_outcome, str) or not execution_outcome.strip()
+    ):
+        raise JudgeBatchError(f"task {task_id} execution_outcome must be a non-empty string or null")
+    if "evidence_ready" in entry:
+        evidence_ready = entry["evidence_ready"]
+        if not isinstance(evidence_ready, bool):
+            raise JudgeBatchError(f"task {task_id} evidence_ready must be boolean")
+    else:
+        # Schema-v1 batches written before evidence readiness was separated from
+        # Runner completion remain valid and keep their original eligibility.
+        evidence_ready = runner_status == "completed"
     required_keys = {"metadata", "data", "outputs", "runner_dir", "trace", "judge_dir"}
     missing = sorted(required_keys - set(entry))
     if missing:
@@ -235,6 +248,8 @@ def _validate_entry_shape(entry: dict[str, Any], judge_root: Path) -> dict[str, 
         "task_id": task_id,
         "adapter": adapter,
         "runner_status": runner_status,
+        "execution_outcome": execution_outcome.strip() if execution_outcome is not None else None,
+        "evidence_ready": evidence_ready,
         "metadata": _absolute_path(entry["metadata"], f"task {task_id} metadata", nullable=True),
         "data": _absolute_path(entry["data"], f"task {task_id} data", nullable=True),
         "outputs": _absolute_path(entry["outputs"], f"task {task_id} outputs", nullable=True),
@@ -251,6 +266,8 @@ def _prepare_entry(entry: dict[str, Any], judge_root: Path, *, force: bool) -> d
         "taskId": task_id,
         "adapter": values["adapter"],
         "runnerStatus": values["runner_status"],
+        "executionOutcome": values["execution_outcome"],
+        "evidenceReady": values["evidence_ready"],
         "metadata": str(values["metadata"]) if values["metadata"] else None,
         "trace": str(values["trace"]) if values["trace"] else None,
         "status": "runner-failure",
@@ -258,11 +275,15 @@ def _prepare_entry(entry: dict[str, Any], judge_root: Path, *, force: bool) -> d
         "preparedDir": str(values["judge_dir"]),
         "result": str(values["judge_dir"] / "judge_result.json"),
     }
-    if values["runner_status"] != "completed":
-        record["error"] = f"Runner status is {values['runner_status']!r}"
+    if not values["evidence_ready"]:
+        record["error"] = (
+            "Judge evidence is not ready "
+            f"(runner_status={values['runner_status']!r}, "
+            f"execution_outcome={values['execution_outcome']!r})"
+        )
         return record
     if values["metadata"] is None or values["outputs"] is None:
-        raise JudgeBatchError(f"task {task_id} completed Runner requires metadata and outputs")
+        raise JudgeBatchError(f"task {task_id} evidence-ready task requires metadata and outputs")
 
     metadata = _read_object(values["metadata"], f"task {task_id} metadata")
     _validate_metadata(metadata, task_id, values["adapter"])
@@ -289,6 +310,9 @@ def _prepare_entry(entry: dict[str, Any], judge_root: Path, *, force: bool) -> d
             "version": 1,
             "adapter": values["adapter"],
             "taskId": task_id,
+            "runnerStatus": values["runner_status"],
+            "executionOutcome": values["execution_outcome"],
+            "evidenceReady": values["evidence_ready"],
             "sourcePaths": {
                 "metadata": str(values["metadata"]),
                 "data": str(values["data"]) if values["data"] else None,
@@ -359,6 +383,8 @@ def prepare(args: argparse.Namespace) -> int:
                 "taskId": task_id,
                 "adapter": entry.get("adapter"),
                 "runnerStatus": entry.get("runner_status"),
+                "executionOutcome": entry.get("execution_outcome"),
+                "evidenceReady": entry.get("evidence_ready", entry.get("runner_status") == "completed"),
                 "metadata": entry.get("metadata") if isinstance(entry.get("metadata"), str) else None,
                 "trace": entry.get("trace") if isinstance(entry.get("trace"), str) else None,
                 "status": "input-error",
@@ -411,6 +437,8 @@ def summarize(args: argparse.Namespace) -> int:
             "taskId": item.get("taskId"),
             "adapter": item.get("adapter"),
             "runnerStatus": item.get("runnerStatus"),
+            "executionOutcome": item.get("executionOutcome"),
+            "evidenceReady": item.get("evidenceReady", item.get("runnerStatus") == "completed"),
             "action": item.get("action"),
             "judgeStatus": "not-judged",
             "score": None,

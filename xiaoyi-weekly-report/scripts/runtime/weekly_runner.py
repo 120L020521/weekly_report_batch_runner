@@ -77,27 +77,16 @@ DEFAULTS: dict[str, Any] = {
     "history_max_retries": 6,
     "history_retry_delay_seconds": 5,
     "prompt_suffix": "",
-    "remote_output_roots": {
-        "Desktop": "/storage/media/100/local/files/Docs/Desktop",
-        "XiaoYiWorkspace": "/storage/Users/currentUser/.xiaoyi/workspace",
-    },
 }
 
-_VIRTUAL_OUTPUT_PATH_MAPPINGS: tuple[tuple[str, str], ...] = (
-    ("/storage/User/currentUser/Desktop", "/storage/media/100/local/files/Docs/Desktop"),
-    ("/storage/Users/currentUser/Desktop", "/storage/media/100/local/files/Docs/Desktop"),
-    ("/data/service/el2/100/hmdfs/account/files/Docs/Desktop", "/storage/media/100/local/files/Docs/Desktop"),
-    ("/storage/User/currentUser/Download", "/storage/media/100/local/files/Docs/Download"),
-    ("/storage/Users/currentUser/Download", "/storage/media/100/local/files/Docs/Download"),
-    ("/data/service/el2/100/hmdfs/account/files/Docs/Download", "/storage/media/100/local/files/Docs/Download"),
-    ("/storage/User/currentUser/Documents", "/storage/media/100/local/files/Docs/Documents"),
-    ("/storage/Users/currentUser/Documents", "/storage/media/100/local/files/Docs/Documents"),
-    ("/data/service/el2/100/hmdfs/account/files/Docs/Documents", "/storage/media/100/local/files/Docs/Documents"),
-)
+_XIAOYI_WORKSPACE_ROOT = "/storage/media/100/local/files/Docs/.xiaoyi/workspace"
+_WEEKLY_WORKLOG_RELATIVE_ROOT = "memory/weekly-report-skill/worklog"
+# Retain the old parser API for callers that import it, but the active Runner no
+# longer uses log-declared paths or Desktop fallbacks to collect artifacts.
+_VIRTUAL_OUTPUT_PATH_MAPPINGS: tuple[tuple[str, str], ...] = ()
 _LOGGED_FILE_EXTENSIONS = "md|markdown|html?|docx?|pdf|xlsx?|csv|jsonl?|txt|log"
 _WORKLOG_PATH_HINTS = ("worklog", "work_log", "work-log", "工作日志", "工作记录")
 _EXCLUDED_OUTPUT_SEGMENTS = ("工作快捷区", "文件输出")
-_XIAOYI_WORKSPACE_ROOT = "/storage/Users/currentUser/.xiaoyi/workspace"
 _CONFIRMATION_PATTERNS = tuple(
     re.compile(pattern, flags=re.IGNORECASE | re.DOTALL)
     for pattern in (
@@ -188,83 +177,6 @@ def _is_excluded_output_path(path: str) -> bool:
     return any(segment in path for segment in _EXCLUDED_OUTPUT_SEGMENTS)
 
 
-def list_remote_desktop_worklogs(
-    remote_output_roots: dict[str, str], *, target: str | None, verbose: bool
-) -> list[RemoteFile]:
-    """List Desktop worklog files and files inside first-level worklog folders."""
-    desktop_root = str(remote_output_roots.get("Desktop", "")).rstrip("/")
-    if not desktop_root:
-        return []
-    quoted = shell_quote(desktop_root)
-    name_filter = (
-        "\\( -iname '*worklog*' -o -iname '*work_log*' -o "
-        "-iname '*work-log*' -o -name '*工作日志*' -o -name '*工作记录*' \\)"
-    )
-    command = (
-        f"find {quoted} -maxdepth 1 -type f {name_filter} "
-        "-exec stat -c '%Y|%s|%n' {} \\;; "
-        f"find {quoted} -mindepth 1 -maxdepth 1 -type d {name_filter} -print | "
-        "while IFS= read -r worklog_dir; do "
-        "[ -n \"$worklog_dir\" ] && find \"$worklog_dir\" -type f "
-        "-exec stat -c '%Y|%s|%n' {} \\;; "
-        "done; echo __END__"
-    )
-    output = remote_shell(command, target=target, timeout=90, verbose=verbose)
-    payload = output.split("__END__", 1)[0]
-    files: list[RemoteFile] = []
-    for line in payload.splitlines():
-        parts = line.strip().split("|", 2)
-        if len(parts) != 3:
-            continue
-        mtime_text, size_text, path = parts
-        if _is_excluded_output_path(path) or not _is_worklog_path(path):
-            continue
-        try:
-            files.append(
-                RemoteFile(
-                    path=path,
-                    size=int(size_text),
-                    mtime=int(mtime_text),
-                    root_label="Desktop",
-                    root_path=desktop_root,
-                )
-            )
-        except ValueError:
-            continue
-    return sorted(files, key=lambda item: item.path)
-
-
-def _remote_file_snapshot(files: Iterable[RemoteFile]) -> dict[str, tuple[int, int]]:
-    return {item.path: (item.size, item.mtime) for item in files}
-
-
-def changed_remote_files(
-    before: dict[str, tuple[int, int]], current: Iterable[RemoteFile]
-) -> list[RemoteFile]:
-    changed = [
-        item for item in current
-        if item.path not in before
-        or item.size != before[item.path][0]
-        or item.mtime != before[item.path][1]
-    ]
-    return sorted(changed, key=lambda item: (item.mtime, item.size, item.path), reverse=True)
-
-
-def changed_desktop_worklogs(
-    before: dict[str, tuple[int, int]] | None,
-    remote_output_roots: dict[str, str],
-    *,
-    target: str | None,
-    verbose: bool,
-) -> list[RemoteFile]:
-    if before is None:
-        return []
-    current = list_remote_desktop_worklogs(
-        remote_output_roots, target=target, verbose=verbose
-    )
-    return changed_remote_files(before, current)
-
-
 def _build_execution_prompt(task_text: str, suffix: str | None) -> str:
     task_text = task_text.rstrip()
     suffix = (suffix or "").strip()
@@ -296,15 +208,6 @@ def build_continue_query(verdict: str) -> str:
     if verdict == "partial-or-failed":
         return "请继续重试并完成尚未完成的部分，严格保持原任务的时间范围、内容和输出格式。"
     return "确认，请继续完成原任务，严格保持原任务的时间范围、内容和输出格式。"
-
-
-def _merge_logged_paths(
-    merged: dict[str, dict[str, Any]], detected: Iterable[dict[str, Any]]
-) -> None:
-    for item in detected:
-        remote_path = item.get("remote_path")
-        if isinstance(remote_path, str) and remote_path:
-            merged[remote_path] = item
 
 
 def _save_dialog_state(
@@ -644,24 +547,6 @@ def _call_push(person: str, config: dict[str, Any], *, target: str | None,
     _stream_command(cmd, cwd=WORKSPACE_ROOT)
 
 
-def _call_fetch(person: str, config: dict[str, Any], *, target: str | None,
-                dry_run: bool) -> None:
-    cmd = _helper_command(
-        config["scripts_root"] / "fetch_device_data.py",
-        "--person", person,
-        "--output", str(config["metadata_root"]),
-        "--src-root", str(config["deliverables_root"]),
-        "--cal-start", str(config["calendar_start"]),
-        "--cal-end", str(config["calendar_end"]),
-        "--timeout", str(config["helper_timeout"]),
-    )
-    if target:
-        cmd.extend(["--device", target])
-    if dry_run:
-        cmd.append("--dry-run")
-    _stream_command(cmd, cwd=WORKSPACE_ROOT)
-
-
 def _safe_relative(remote_file: RemoteFile) -> Path:
     prefix = remote_file.root_path + "/"
     relative = remote_file.path[len(prefix):] if remote_file.path.startswith(prefix) else PurePosixPath(remote_file.path).name
@@ -693,6 +578,75 @@ def pull_remote_files(files: Iterable[RemoteFile], *, local_root: Path,
             record["error"] = str(exc)
         manifest.append(record)
     return manifest
+
+
+def _validated_dialog_id(dialog_id: str) -> str:
+    normalized = dialog_id.strip()
+    if (
+        not normalized
+        or normalized in {".", ".."}
+        or "/" in normalized
+        or "\\" in normalized
+        or ".." in normalized
+    ):
+        raise ValueError(f"不安全的 dialog_id: {dialog_id!r}")
+    return normalized
+
+
+def _remote_files_from_stat(
+    payload: str, *, root_label: str, root_path: str
+) -> list[RemoteFile]:
+    files: list[RemoteFile] = []
+    for line in payload.splitlines():
+        parts = line.strip().split("|", 2)
+        if len(parts) != 3:
+            continue
+        mtime_text, size_text, path = parts
+        try:
+            files.append(
+                RemoteFile(
+                    path=path,
+                    size=int(size_text),
+                    mtime=int(mtime_text),
+                    root_label=root_label,
+                    root_path=root_path,
+                )
+            )
+        except ValueError:
+            continue
+    return sorted(files, key=lambda item: item.path)
+
+
+def list_dialog_workspace_artifacts(
+    dialog_id: str, *, target: str | None, verbose: bool
+) -> tuple[list[RemoteFile], list[RemoteFile]]:
+    """List only the report files and fixed weekly worklog for one dialog."""
+    dialog_id = _validated_dialog_id(dialog_id)
+    dialog_root = f"{_XIAOYI_WORKSPACE_ROOT}/{dialog_id}"
+    worklog_root = f"{dialog_root}/{_WEEKLY_WORKLOG_RELATIVE_ROOT}"
+    quoted_dialog = shell_quote(dialog_root)
+    quoted_worklog = shell_quote(worklog_root)
+    command = (
+        f"if [ -d {quoted_dialog} ]; then "
+        f"find {quoted_dialog} -mindepth 1 -maxdepth 1 -type f "
+        "-exec stat -c '%Y|%s|%n' {} \\;; fi; "
+        "echo __WORKLOG__; "
+        f"if [ -d {quoted_worklog} ]; then "
+        f"find {quoted_worklog} -type f -exec stat -c '%Y|%s|%n' {{}} \\;; fi; "
+        "echo __END__"
+    )
+    output = remote_shell(command, target=target, timeout=90, verbose=verbose)
+    before_end = output.split("__END__", 1)[0]
+    report_payload, separator, worklog_payload = before_end.partition("__WORKLOG__")
+    if not separator:
+        raise RuntimeError(f"dialog workspace 枚举结果缺少分隔标记: {dialog_root}")
+    reports = _remote_files_from_stat(
+        report_payload, root_label="XiaoYiWorkspace", root_path=dialog_root
+    )
+    worklogs = _remote_files_from_stat(
+        worklog_payload, root_label="XiaoYiWorkspace", root_path=dialog_root
+    )
+    return reports, worklogs
 
 
 def wait_for_new_stop(*, task_id: str, before: dict[str, tuple[int, int]],
@@ -747,12 +701,17 @@ def _archive_previous_attempt(task_dir: Path) -> None:
 def _write_artifact_manifest(task_dir: Path, *, task_id: str,
                              output_records: list[dict[str, Any]],
                              worklog_records: list[dict[str, Any]],
-                             logged_paths: list[dict[str, Any]]) -> None:
+                             dialog_id: str) -> None:
+    dialog_root = f"{_XIAOYI_WORKSPACE_ROOT}/{dialog_id}"
     manifest = {
         "task_id": task_id,
         "case_id": task_dir.name,
         "pulled_at": datetime.now().isoformat(timespec="seconds"),
-        "logged_paths": logged_paths,
+        "dialog_id": dialog_id,
+        "workspace": {
+            "dialog_root": dialog_root,
+            "worklog_root": f"{dialog_root}/{_WEEKLY_WORKLOG_RELATIVE_ROOT}",
+        },
         "outputs": output_records,
         "worklogs": worklog_records,
     }
@@ -816,42 +775,28 @@ def _collect_task_artifacts(
     task_id: str,
     target: str | None,
     verbose: bool,
-    logged_paths: list[dict[str, Any]],
-    extra_worklog_files: Iterable[RemoteFile] = (),
+    dialog_id: str,
 ) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
-    """Pull concrete Desktop files plus changed Desktop worklogs for this Task."""
-    resolved_files = resolve_logged_remote_files(logged_paths, target=target, verbose=verbose)
-    logged_worklog_files = [
-        item for item in resolved_files
-        if _is_worklog_path(item.path)
-    ]
-    worklog_paths = {item.path for item in logged_worklog_files}
-    fallback_worklog_files = [
-        item for item in extra_worklog_files
-        if item.path not in worklog_paths and not _is_excluded_output_path(item.path)
-    ]
-    worklog_paths.update(item.path for item in fallback_worklog_files)
-    report_files = [item for item in resolved_files if item.path not in worklog_paths]
+    """Pull reports and worklogs only from this dialog's fixed workspace paths."""
+    report_files, worklog_files = list_dialog_workspace_artifacts(
+        dialog_id, target=target, verbose=verbose
+    )
     output_records = pull_remote_files(
         report_files, local_root=task_dir / "outputs", target=target, verbose=verbose
     )
-    logged_worklog_records = pull_remote_files(
-        logged_worklog_files, local_root=task_dir / "outputs", target=target, verbose=verbose
+    worklog_records = pull_remote_files(
+        worklog_files, local_root=task_dir / "outputs", target=target, verbose=verbose
     )
-    fallback_worklog_records = pull_remote_files(
-        fallback_worklog_files, local_root=task_dir / "outputs", target=target, verbose=verbose
-    )
-    for record in output_records + logged_worklog_records:
-        record["selection_source"] = "log"
-    for record in fallback_worklog_records:
-        record["selection_source"] = "desktop-worklog-delta"
-    worklog_records = logged_worklog_records + fallback_worklog_records
+    for record in output_records:
+        record["selection_source"] = "dialog-workspace-root"
+    for record in worklog_records:
+        record["selection_source"] = "dialog-weekly-worklog"
     _write_artifact_manifest(
         task_dir,
         task_id=task_id,
         output_records=output_records,
         worklog_records=worklog_records,
-        logged_paths=logged_paths,
+        dialog_id=dialog_id,
     )
     return output_records, worklog_records
 
@@ -869,24 +814,13 @@ def run_weekly_task(task: WeeklyTask, config: dict[str, Any], *, target: str | N
     print(f"\n{'=' * 70}\n[{task.task_id}] {task.person}: {task.metadata['task']}\n{'=' * 70}")
     if dry_run:
         print(f"[{task.task_id}] [DRY-RUN] execution prompt:\n{execution_prompt}")
-        print(f"[{task.task_id}] [DRY-RUN] 将推送 metadata.task、监控日志并拉取增量周报/worklog")
+        print(f"[{task.task_id}] [DRY-RUN] 将监控并拉取 Trace，再按 dialog workspace 拉取周报/worklog")
         return True
 
     task_dir.mkdir(parents=True, exist_ok=True)
     _archive_previous_attempt(task_dir)
     shutil.copy2(task.metadata_path, task_dir / "metadata.json")
     save_prompt_text(execution_prompt, case_id=case_id, run_dir=str(output_root), tag="prompt")
-
-    worklog_baseline: dict[str, tuple[int, int]] | None
-    try:
-        worklog_baseline = _remote_file_snapshot(
-            list_remote_desktop_worklogs(
-                config["remote_output_roots"], target=target, verbose=verbose
-            )
-        )
-    except Exception as exc:
-        worklog_baseline = None
-        print(f"[{task.task_id}] worklog 基线获取失败，仅使用日志声明路径: {exc}", file=sys.stderr)
 
     before_logs = snapshot(list_remote_logs(target=target, user_id=None, date_id=today_id(), verbose=verbose))
     active_before = before_logs
@@ -897,10 +831,6 @@ def run_weekly_task(task: WeeklyTask, config: dict[str, Any], *, target: str | N
     interrupted = False
     output_records: list[dict[str, Any]] = []
     worklog_records: list[dict[str, Any]] = []
-    logged_paths: list[dict[str, Any]] = []
-    logged_paths_by_remote: dict[str, dict[str, Any]] = {}
-    desktop_worklog_files: list[RemoteFile] = []
-    worklog_delta_checked = False
     artifacts_collected = False
     dialog_page_id = ""
     continue_queries: list[str] = []
@@ -935,12 +865,23 @@ def run_weekly_task(task: WeeklyTask, config: dict[str, Any], *, target: str | N
                 verbose=verbose,
             )
             stop_content = extract_stop_content(local_log, case_id, output_root)
-            round_logged_paths = extract_logged_output_paths(
-                local_log,
-                start_byte=active_before.get(done_log.path, (0, 0))[0],
-                remote_output_roots=config["remote_output_roots"],
-            )
-            _merge_logged_paths(logged_paths_by_remote, round_logged_paths)
+            if not dialog_page_id:
+                print(f"[{task.task_id}] 获取当前对话 dialogPageId...")
+                dialog_page_id = get_latest_dialog_page_id(
+                    target=target,
+                    wait_seconds=float(config.get("history_initial_wait_seconds", 8)),
+                    max_retries=int(config.get("history_max_retries", 6)),
+                    retry_delay=float(config.get("history_retry_delay_seconds", 5)),
+                    verbose=verbose,
+                )
+                if not dialog_page_id:
+                    warning = (
+                        "history_list.json 未提供 dialogPageId；无法定位当前对话的 "
+                        ".xiaoyi/workspace 产物目录"
+                    )
+                    if warning not in runner_warnings:
+                        runner_warnings.append(warning)
+                    print(f"[{task.task_id}] WARNING: {warning}", file=sys.stderr)
             dialog_verdict = classify_stop_content(stop_content)
             print(
                 f"[{task.task_id}] 对话轮次 {round_number}: {dialog_verdict}"
@@ -968,22 +909,7 @@ def run_weekly_task(task: WeeklyTask, config: dict[str, Any], *, target: str | N
                 )
                 break
             if not dialog_page_id:
-                print(f"[{task.task_id}] 获取当前对话 dialogPageId...")
-                dialog_page_id = get_latest_dialog_page_id(
-                    target=target,
-                    wait_seconds=float(config.get("history_initial_wait_seconds", 8)),
-                    max_retries=int(config.get("history_max_retries", 6)),
-                    retry_delay=float(config.get("history_retry_delay_seconds", 5)),
-                    verbose=verbose,
-                )
-                if not dialog_page_id:
-                    warning = (
-                        "小艺回复仍需续接，但 history_list.json 未提供 dialogPageId；"
-                        "停止续接并按已回收的 Runner 证据决定状态"
-                    )
-                    runner_warnings.append(warning)
-                    print(f"[{task.task_id}] WARNING: {warning}", file=sys.stderr)
-                    break
+                break
 
             continue_query = build_continue_query(dialog_verdict)
             continue_queries.append(continue_query)
@@ -1017,26 +943,15 @@ def run_weekly_task(task: WeeklyTask, config: dict[str, Any], *, target: str | N
             history_session_id = dialog_page_id
             round_number = next_round
 
-        logged_paths = list(logged_paths_by_remote.values())
-        try:
-            desktop_worklog_files = changed_desktop_worklogs(
-                worklog_baseline,
-                config["remote_output_roots"],
+        if dialog_page_id:
+            output_records, worklog_records = _collect_task_artifacts(
+                task_dir,
+                task_id=task.task_id,
                 target=target,
                 verbose=verbose,
+                dialog_id=dialog_page_id,
             )
-        except Exception as exc:
-            print(f"[{task.task_id}] 桌面 worklog 增量检测失败: {exc}", file=sys.stderr)
-        worklog_delta_checked = True
-        output_records, worklog_records = _collect_task_artifacts(
-            task_dir,
-            task_id=task.task_id,
-            target=target,
-            verbose=verbose,
-            logged_paths=logged_paths,
-            extra_worklog_files=desktop_worklog_files,
-        )
-        artifacts_collected = True
+            artifacts_collected = True
     except KeyboardInterrupt:
         interrupted = True
         failure = "手动中断"
@@ -1062,44 +977,29 @@ def run_weekly_task(task: WeeklyTask, config: dict[str, Any], *, target: str | N
         try:
             local_log = pull_log(done_log, case_id=case_id, run_dir=str(output_root), target=target, verbose=verbose)
             extract_stop_content(local_log, case_id, output_root)
-            fallback_logged_paths = extract_logged_output_paths(
-                local_log,
-                start_byte=active_before.get(done_log.path, (0, 0))[0],
-                remote_output_roots=config["remote_output_roots"],
-            )
-            _merge_logged_paths(logged_paths_by_remote, fallback_logged_paths)
-            logged_paths = list(logged_paths_by_remote.values())
         except Exception as exc:
             failure = failure or f"日志拉取失败: {exc}"
 
     if not artifacts_collected:
         try:
-            if not worklog_delta_checked:
-                desktop_worklog_files = changed_desktop_worklogs(
-                    worklog_baseline,
-                    config["remote_output_roots"],
-                    target=target,
-                    verbose=verbose,
-                )
-                worklog_delta_checked = True
+            if not dialog_page_id:
+                raise RuntimeError("没有 dialogPageId，无法定位对话 workspace")
             output_records, worklog_records = _collect_task_artifacts(
                 task_dir,
                 task_id=task.task_id,
                 target=target,
                 verbose=verbose,
-                logged_paths=logged_paths,
-                extra_worklog_files=desktop_worklog_files,
+                dialog_id=dialog_page_id,
             )
+            artifacts_collected = True
         except Exception as exc:
             failure = failure or f"产物拉取失败: {exc}"
 
     failed_pulls = [item for item in output_records + worklog_records if item.get("status") != "pulled"]
     if failed_pulls:
         failure = failure or f"{len(failed_pulls)} 个远端产物拉取失败"
-    if not logged_paths:
-        failure = failure or "本任务新增日志中未发现可映射的产物路径"
-    elif not output_records and not worklog_records:
-        failure = failure or "日志中的产物路径在设备上不存在或不含文件"
+    if not output_records:
+        failure = failure or "当前 dialog workspace 根目录中未发现周报文件"
     present_formats = _present_formats(task_dir / "outputs")
     if config.get("require_worklog") and not worklog_records:
         failure = failure or "未发现本任务新增/修改的 worklog"
@@ -1121,6 +1021,7 @@ def run_weekly_task(task: WeeklyTask, config: dict[str, Any], *, target: str | N
         "dialog_rounds": round_number + 1,
         "pushes": 1 + len(continue_queries),
         "dialog_verdict": dialog_verdict,
+        "dialog_id": dialog_page_id or None,
         "continue_queries": continue_queries,
         "warnings": runner_warnings,
     }
@@ -1154,7 +1055,6 @@ def _task_handoff_entry(task: WeeklyTask, output_root: Path) -> dict[str, Any]:
             break
     trace_path = task_dir / f"{case_id}.jsonl"
     metadata_path = task.metadata_path.resolve()
-    person_data = (task.metadata_path.parent.parent / "data").resolve()
     outputs_path = (task_dir / "outputs").resolve()
     runner_task_dir = task_dir.resolve()
     return {
@@ -1167,7 +1067,7 @@ def _task_handoff_entry(task: WeeklyTask, output_root: Path) -> dict[str, Any]:
         "marker": str(marker_path.resolve()) if marker_path else None,
         "judgeInputs": {
             "metadata": str(metadata_path),
-            "data": str(person_data),
+            "data": None,
             "outputs": str(outputs_path),
             "runnerTaskDir": str(runner_task_dir),
         },
@@ -1186,7 +1086,6 @@ def _handoff_inputs_ready(entries: Iterable[dict[str, Any]]) -> bool:
             return False
         required_paths = {
             "metadata": "file",
-            "data": "dir",
             "outputs": "dir",
             "runnerTaskDir": "dir",
         }
@@ -1236,7 +1135,7 @@ def write_weekly_runner_handoff(
 
 def run_person(person: str, tasks: list[WeeklyTask], config: dict[str, Any], *,
                target: str | None, verbose: bool, dry_run: bool, rerun: bool,
-               stop_on_error: bool, skip_push: bool, skip_fetch: bool,
+               stop_on_error: bool, skip_push: bool,
                skip_clear: bool, skip_initial_clear: bool,
                clear_on_interrupt: bool) -> tuple[int, int, bool, bool]:
     output_root: Path = config["output_root"]
@@ -1279,12 +1178,6 @@ def run_person(person: str, tasks: list[WeeklyTask], config: dict[str, Any], *,
         print(f"[{person}] 人员流程失败: {exc}", file=sys.stderr)
 
     if not interrupted:
-        if not skip_fetch:
-            try:
-                _call_fetch(person, config, target=target, dry_run=dry_run)
-            except Exception as exc:
-                lifecycle_error = lifecycle_error or f"设备数据拉取失败: {exc}"
-                print(f"[{person}] {lifecycle_error}", file=sys.stderr)
         if not skip_clear:
             try:
                 _call_clear(config, target=target, dry_run=dry_run)
@@ -1334,7 +1227,6 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--rerun", action="store_true", help="忽略 completed.json 重新执行")
     parser.add_argument("--stop-on-error", action="store_true")
     parser.add_argument("--skip-push", action="store_true")
-    parser.add_argument("--skip-fetch", action="store_true")
     parser.add_argument("--skip-clear", action="store_true")
     parser.add_argument("--skip-initial-clear", action="store_true")
     parser.add_argument("--clear-on-interrupt", action="store_true")
@@ -1407,7 +1299,6 @@ def main(argv: list[str] | None = None) -> int:
                 rerun=args.rerun,
                 stop_on_error=args.stop_on_error,
                 skip_push=args.skip_push,
-                skip_fetch=args.skip_fetch,
                 skip_clear=args.skip_clear,
                 skip_initial_clear=skip_initial_clear,
                 clear_on_interrupt=args.clear_on_interrupt,

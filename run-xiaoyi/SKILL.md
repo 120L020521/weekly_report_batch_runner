@@ -86,6 +86,8 @@ After every selected Runner item is terminal, write one UTF-8
       "task_id": "21",
       "adapter": "weekly-report",
       "runner_status": "completed",
+      "execution_outcome": "completed",
+      "evidence_ready": true,
       "metadata": "D:/workspace/task/何沐/21/metadata.json",
       "data": "D:/workspace/task/何沐/data",
       "outputs": "D:/workspace/xiaoyi_logs/task21/outputs",
@@ -98,15 +100,31 @@ After every selected Runner item is terminal, write one UTF-8
 ```
 
 Write every path field explicitly and absolutely; use `null` only for optional
-`data`, `runner_dir`, or `trace`. A completed Runner requires metadata and
-outputs. Normalize Runner state to `completed`, `failed`, `timeout`, `unknown`,
-or `not-run`. Copy paths from the Runner handoff; never scan for substitutes.
-Keep every `judge_dir` unique and below `judge_root`.
+`data`, `runner_dir`, or `trace`. Also write the Runner-native terminal state as
+`execution_outcome` and whether frozen Judge inputs are complete as
+`evidence_ready`. Normalize Runner state to `completed`, `failed`, `timeout`,
+`unknown`, or `not-run`. Copy paths and state from the Runner handoff; never scan
+for substitutes. Keep every `judge_dir` unique and below `judge_root`.
+
+For file organization, map `complete` to `runner_status = completed`; map
+`incomplete-after-3-continues` and `execution-error` to `runner_status = failed`,
+while preserving the exact value in `execution_outcome`. Copy `runnerDir`,
+`trace`, and `evidenceReady` directly to `runner_dir`, `trace`, and
+`evidence_ready`. A valid final directory snapshot may therefore be Judgeable
+even when XiaoYi's dialogue did not complete. Trace presence is independent: a
+null Trace does not block Judge but makes that task ineligible for HALO.
+
+For a legacy or non-file Runner handoff without an explicit readiness flag, set
+`evidence_ready = (runner_status == "completed")`. Existing schema-v1 Judge
+batches without `execution_outcome` or `evidence_ready` remain accepted by the
+Judge with the same fallback.
 
 Invoke the shared Judge once for this whole batch. It performs one common
 Prepare, creates the common result layout, dispatches the adapter-specific
 evaluator, validates each result, and writes `batch_summary.json`. Do not run
-Judge on `runner-failure` or `input-error` entries.
+Judge on `runner-failure` or `input-error` entries. These statuses mean the frozen
+evidence itself is unavailable or invalid, not merely that the Runner's business
+outcome was unsuccessful.
 
 For `RUNNER_JUDGE`, return the Runner handoff, `judge_batch.json`, Judge queue,
 and batch summary, then stop.
@@ -121,7 +139,8 @@ Do not create a second handoff file.
 HALO reads the common Judge queue, assigns each Trace-bearing task to one fresh
 diagnosis subagent, preserves failure isolation, and merges valid per-task
 reports into one HTML. The queue already contains each task's adapter, Runner
-status, raw Trace, prepared Judge directory, and result path. HALO owns the
+status, native execution outcome, evidence readiness, raw Trace, prepared Judge
+directory, and result path. HALO owns the
 adapter-to-editable-surface policy; do not add another resolver or handoff layer.
 
 The complete full-flow boundary is:

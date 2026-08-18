@@ -124,6 +124,8 @@ def _task_record(item: dict[str, Any], output_root: Path, mode: str) -> tuple[di
         "task": metadata.get("task") or metadata.get("description"),
         "trace_fingerprint": _sha256(trace) if trace and trace.is_file() else "",
         "runner_status": item.get("runnerStatus"),
+        "execution_outcome": item.get("executionOutcome"),
+        "evidence_ready": item.get("evidenceReady"),
         "judge_status": judge.get("status", "missing"),
         "judge_passed": judge.get("passed"),
         "judge_score": judge.get("score"),

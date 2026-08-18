@@ -6,8 +6,9 @@ description: >-
   adapter: weekly-report. Use for report generation Runner execution that must push
   each person's files, calendar, and memos once; execute that person's selected
   tasks serially; automatically continue the same XiaoYi dialog through
-  confirmation, choice, or retry stops; pull log-declared reports and worklogs;
-  fetch evidence; and clear the device before the next person. All executable
+  confirmation, choice, or retry stops; pull reports and worklogs only from the
+  current dialog's fixed XiaoYi workspace; preserve the original Trace pull;
+  and clear the device before the next person. All executable
   code and default configuration are bundled in this Skill; task and deliverable
   data remain external. Return a deterministic batch handoff that a parent
   run-xiaoyi coordinator can pass to the shared Judge and HALO skills.
@@ -58,10 +59,12 @@ Desktop, Documents, and Download, then push that person's data. For each person:
 3. Send `metadata.task` as the XiaoYi prompt by default. Do not append a desktop
    output instruction during normal runs. Use `prompt_suffix` only as an explicit
    compatibility override when the user asks for it.
-4. After every `stop_reason=stop`, read the latest main-Agent reply. Treat an
+4. After every `stop_reason=stop`, read the latest main-Agent reply. After the
+   first stop, refresh the history list and require the current `dialogPageId`
+   even when the reply is already complete; this ID selects the only allowed
+   artifact workspace. Treat an
    explicit confirmation/permission/choice gate, a future-only plan, or a
-   partial/failed result as incomplete. Refresh the history list only when a
-   continuation is required. After starting the history-list ability, wait eight
+   partial/failed result as incomplete. After starting the history-list ability, wait eight
    seconds by default, then read `history_list.json` up to six times with a
    five-second retry interval. Keep these values configurable through
    `history_initial_wait_seconds`, `history_max_retries`, and
@@ -70,42 +73,38 @@ Desktop, Documents, and Download, then push that person's data. For each person:
    that preserves the original time range, content, and output format. Allow at
    most three continuation pushes by default; never clear, re-push person data,
    or force-stop XiaoYi between dialog rounds.
-5. Pull each round's current JSONL log, parse only bytes after that round's
-   baseline, merge its concrete artifact paths, and pull only concrete files from
-   declared output roots into `<output_root>/task<numeric_id>/outputs/`. Support
-   the XiaoYi session workspace (`/storage/Users/currentUser/.xiaoyi/workspace/<session_id>`)
-   when write/bash logs declare relative report or worklog paths. Reject
-   `工作快捷区`, `文件输出`, and arbitrary declared directories; recurse only into
-   a declared worklog-like directory.
-6. Before each Task, record metadata for worklog artifacts only: matching files
-   at the Desktop root and every concrete file inside a first-level Desktop folder
-   whose name contains `worklog`, `work_log`, `work-log`, `工作日志`, or `工作记录`.
-   After the Task, pull only files that are new or changed, preserving the matching
-   folder beneath `outputs/Desktop/`. Use this targeted delta when the JSONL omits
-   the Desktop worklog folder or file paths.
-7. After the Task reaches a final dialog verdict and its log and artifacts are
-   safely local, force-stop XiaoYi exactly
+5. Preserve the existing JSONL flow unchanged: snapshot the pre-Task log baseline,
+   wait for a new `stop_reason=stop`, and pull the selected raw Trace to
+   `<output_root>/task<numeric_id>/task<numeric_id>.jsonl` after each round.
+   Trace content no longer selects report/worklog paths.
+6. After the final dialog verdict, use only these HDC-visible paths:
+
+   ```text
+   /storage/media/100/local/files/Docs/.xiaoyi/workspace/<dialogPageId>/
+   /storage/media/100/local/files/Docs/.xiaoyi/workspace/<dialogPageId>/memory/weekly-report-skill/worklog/
+   ```
+
+   Pull direct files from the first path as generated reports. Recursively pull
+   concrete files from the second path as worklog. Preserve both beneath
+   `<output_root>/task<numeric_id>/outputs/XiaoYiWorkspace/`. Do not inspect or
+   pull Desktop, Documents, Download, calendar, memo, source-data mirrors,
+   log-declared artifact paths, or any other workspace directory.
+7. After the Task reaches a final dialog verdict and its Trace, report, and
+   worklog are safely local, force-stop XiaoYi exactly
    once. Start the next Task through `PCAgentTaskAbility`; do not clear or push
    again when it belongs to the same person.
-8. Fetch device calendar and memo evidence plus the complete local source-file
-   mirror into `<metadata_root>/<person>/data/` after the person's selected Tasks
-   are terminal. Do not filter source directories such as mail, inbox, memos,
-   calendar/schedule exports, or XiaoYi Meeting/Notes evidence; Judge needs the
-   same available evidence surface as XiaoYi.
-9. Clear the person's device data before continuing to the next person. Run all
-   fetch, clear, and subsequent push calls to `BatchToolExecuteAbility` with
+8. Clear the person's device data before continuing to the next person. Run all
+   clear and subsequent push calls to `BatchToolExecuteAbility` with
    `--keep-app-running`; never force-stop between those lifecycle substeps.
-10. When the previous person's final clear succeeded, skip the next person's
+9. When the previous person's final clear succeeded, skip the next person's
    initial clear and push the next data directly. Retry the initial clear only
    when the previous cleanup failed.
 
-Never parallelize people or Tasks. Require a JSONL baseline. Do not take a full
-Desktop, Documents, or Download snapshot. The worklog fallback may query only
-worklog-like files at the Desktop root and first-level worklog-like Desktop folders,
-then compare their contained files by size/mtime. If the current log does not
-declare a concrete report file under a configured output root or XiaoYi session
-workspace, fail the Task instead of scanning an arbitrary directory and guessing.
-Require at least one pulled worklog file.
+Never parallelize people or Tasks. Require a JSONL baseline and a non-empty,
+path-safe `dialogPageId`. Do not take a full Desktop, Documents, or Download
+snapshot and do not fall back to them. Fail the Task when its fixed dialog
+workspace has no direct report file, its required worklog directory has no pulled
+file, or the dialog ID cannot be resolved. Require at least one pulled worklog file.
 Do not explicitly relaunch XiaoYi between lifecycle substeps. Starting the next
 Task through `PCAgentTaskAbility` is the relaunch point.
 
@@ -113,9 +112,9 @@ Automatic continuation is enabled by `auto_continue: true`; keep it enabled for
 normal runs. `max_continue_rounds` defaults to `3`, giving four pushes total
 (initial plus three continuations), matching `xiaoyi-auto-continue`. If the reply
 still blocks or remains incomplete after the budget, preserve that as an execution
-failure. If no `dialogPageId` can be resolved, stop continuation, record a Runner
-warning, and finish collecting the current Trace, report, and worklog. Mark the Task
-complete when those artifacts pass the Runner's operational collection checks so
+failure. If no `dialogPageId` can be resolved, preserve the current Trace but fail
+artifact collection because the allowed workspace cannot be addressed. Mark the Task
+complete when the fixed-workspace artifacts pass the Runner's operational collection checks so
 the shared Judge can determine content correctness; otherwise mark the concrete
 collection failure. Do not interpret a courtesy question after a concrete completion
 statement as another confirmation gate.
@@ -158,12 +157,12 @@ Use separate data paths only when the directories do not share one root:
 ```
 
 Use `--config <json>` only to override runtime settings such as month, calendar
-range, timeouts, intervals, optional prompt suffix, or remote output roots. The launcher
+range, timeouts, intervals, or optional prompt suffix. The launcher
 always replaces `scripts_root` with its bundled runtime and CLI data paths take
 precedence over config paths.
 
 Use `--dry-run` for a no-HDC lifecycle preview. Do not pass `--skip-clear`,
-`--skip-push`, `--skip-fetch`, or `--skip-initial-clear` during a normal run.
+`--skip-push`, or `--skip-initial-clear` during a normal run.
 Do not use `--rerun` unless the user explicitly requests replacement. Treat the
 runner as a long-running quiet process; wait on the same process and never relaunch
 it merely because output is quiet.
@@ -203,16 +202,16 @@ HDC diagnostics to the invoking console only. The only batch-level file created 
 Runner is `weekly_runner_batch.json`; per-Task evidence remains under `task<ID>/`.
 
 For every selected Task, require the handoff entry to include these exact Judge
-inputs after that person's fetch stage has completed:
+inputs after artifact collection has completed:
 
 ```text
 judgeInputs.metadata      = <metadata_root>/<person>/<ID>/metadata.json
-judgeInputs.data          = <metadata_root>/<person>/data
+judgeInputs.data          = null
 judgeInputs.outputs       = <output_root>/task<ID>/outputs
 judgeInputs.runnerTaskDir = <output_root>/task<ID>
 ```
 
-Write `runnerFinished = true` only after every selected person's Tasks, fetch, and
+Write `runnerFinished = true` only after every selected person's Tasks and
 cleanup lifecycle has returned. A parent coordinator must not start Judge before
 that final handoff exists.
 

@@ -31,6 +31,8 @@ is terminal:
       "task_id": "21",
       "adapter": "weekly-report",
       "runner_status": "completed",
+      "execution_outcome": "completed",
+      "evidence_ready": true,
       "metadata": "D:/workspace/task/何沐/21/metadata.json",
       "data": "D:/workspace/task/何沐/data",
       "outputs": "D:/workspace/xiaoyi_logs/task21/outputs",
@@ -45,8 +47,17 @@ is terminal:
 Require globally unique ordered string IDs, one of `file-organization`,
 `workspacebench`, or `weekly-report`, normalized Runner status, explicit absolute
 paths, and a unique `judge_dir` below `judge_root`. Optional `data`, `runner_dir`,
-and `trace` may be `null`; every path key must still exist. Only
-`runner_status = completed` is Judgeable.
+and `trace` may be `null`; every path key must still exist. New batches also
+preserve the Runner-native `execution_outcome` and boolean `evidence_ready`.
+Only `evidence_ready = true` is Judgeable; it requires non-null metadata and
+outputs but does not require `runner_status = completed` or a Trace.
+
+For backward compatibility, a schema-v1 batch without `evidence_ready` defaults
+to `runner_status = completed`; `execution_outcome` may be absent or `null`.
+This lets file-organization cases with a complete final snapshot be evaluated
+after `incomplete-after-3-continues` or `execution-error`, while preserving that
+business outcome for reports and diagnosis. A null Trace blocks only HALO for
+that task, never Judge.
 
 ## Common Prepare
 
@@ -75,8 +86,8 @@ paths in `case_manifest.json`. `runner-failure` and `input-error` queue entries
 are terminal and must not be repaired or sent to an evaluator.
 
 Every queue row also preserves the explicit source `metadata` and raw `trace`
-paths. HALO consumes this same `judge_queue.json` after Judge; do not generate a
-second HALO handoff.
+paths, Runner-native execution outcome, and evidence readiness. HALO consumes
+this same `judge_queue.json` after Judge; do not generate a second HALO handoff.
 
 `metadata.json` and `case_manifest.json` are Judge inputs. They are produced by
 the common Prepare stage, never by an adapter evaluator. `judge_result.json` is

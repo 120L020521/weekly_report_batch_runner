@@ -35,7 +35,8 @@ not require or create `handoff.json`, and do not scan directories for Tasks.
 
 Read `judge_queue.json` once. Verify its version/producer and preserve Task order.
 For each row, use the declared `trace`, `metadata`, `preparedDir`, `result`,
-`adapter`, and `runnerStatus`; never search for alternatives. Prefer
+`adapter`, `runnerStatus`, `executionOutcome`, and `evidenceReady`; never search
+for alternatives. Prefer
 `<preparedDir>/metadata.json` when it exists. Use
 `<preparedDir>/judge_result.json` only when it exists and passed Judge
 validation. Missing Trace skips only that Task.
@@ -43,6 +44,11 @@ validation. Missing Trace skips only that Task.
 Diagnose all Trace-bearing Tasks by default. When the user explicitly requests
 failed-only diagnosis, select Runner failures, missing/errored Judge results, and
 `passed = false` results.
+
+`executionOutcome` and `evidenceReady` are optional on legacy queues. Preserve
+them when present; they explain why a file-organization snapshot was Judgeable
+even when its dialogue outcome was unsuccessful. They do not replace Trace
+evidence and do not change the Trace-bearing eligibility rule.
 
 Assign each selected Task to one fresh diagnosis subagent. Run up to the
 available concurrency limit, refill freed slots, and continue after isolated

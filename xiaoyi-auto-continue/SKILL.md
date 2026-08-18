@@ -301,14 +301,31 @@ host Agent's batch state:
   "caseId": "FileOrganization_0_001",
   "executionOutcome": "complete",
   "metadata": "<test_file_base>/FileOrganization_0_001/metadata.json",
-  "outputs": "<run_dir>/FileOrganization_0_001/outputs"
+  "outputs": "<run_dir>/FileOrganization_0_001/outputs",
+  "runnerDir": "<run_dir>/FileOrganization_0_001",
+  "trace": "<run_dir>/FileOrganization_0_001/FileOrganization_0_001.jsonl",
+  "evidenceReady": true
 }
 ```
 
-The metadata path is a later Judge input and need not block Runner execution.
+Use absolute paths in the real handoff. `runnerDir` is the exact current case
+directory and `trace` is the exact raw JSONL pulled for the latest round; never
+derive either later by scanning. `trace` may be `null` only when the mechanical
+flow did not produce a current JSONL. It does not decide Judge eligibility.
+
+Set `evidenceReady = true` when the declared metadata file exists and the latest
+`outputs/` snapshot exists with exact `Desktop`, `Download`, and `Documents`
+roots. When `outputs_manifest.json` exists, also require every listed item to have
+`status = pulled`. Do not require a successful dialogue outcome or a Trace: an
+`incomplete-after-3-continues` or `execution-error` case with a complete final
+snapshot remains Judgeable. Otherwise set it to `false`; never claim readiness
+from XiaoYi's wording alone.
+
+The metadata path is a later Judge input and need not block device execution.
 Preserve entries for incomplete and execution-error cases so the batch Judge can
-report missing or invalid evidence consistently. Do not start batch Judge until
-every selected case has reached a terminal execution outcome.
+evaluate valid final snapshots or report missing evidence consistently. Do not
+start batch Judge until every selected case has reached a terminal execution
+outcome.
 
 ## Batch and failure behavior
 
@@ -322,8 +339,9 @@ another case. Do not use a historical case artifact as evidence for the current 
 
 After the host queue is exhausted, return the ordered batch handoff containing
 `run_dir`, `test_file_base`, every selected case ID, execution outcome, metadata
-path, and outputs path. This is the only point at which a parent workflow may
-start `judge-xiaoyi-results` for the batch.
+path, outputs path, Runner directory, raw Trace path, and evidence readiness. This
+is the only point at which a parent workflow may start `judge-xiaoyi-results` for
+the batch.
 
 Also write the same handoff to `<run_dir>/runner_batch.json` only after the last
 selected case becomes terminal. Use this stable contract so Judge does not depend
@@ -342,7 +360,10 @@ on conversation memory:
       "caseId": "FileOrganization_0_001",
       "executionOutcome": "complete",
       "metadata": "<absolute_metadata_path>",
-      "outputs": "<absolute_outputs_path>"
+      "outputs": "<absolute_outputs_path>",
+      "runnerDir": "<absolute_case_dir>",
+      "trace": "<absolute_case_dir>/FileOrganization_0_001.jsonl",
+      "evidenceReady": true
     }
   ]
 }
@@ -352,7 +373,9 @@ Preserve selected order, use absolute paths, include every selected case exactly
 once, and write `runnerFinished: true` only after the queue is exhausted. Never
 create a partial file with `runnerFinished: true`. A parent Judge must reject a
 handoff whose case count/order differs from the requested selection or whose
-outcome is outside the three terminal values below.
+outcome is outside the three terminal values below. `runnerDir`, `trace`, and
+`evidenceReady` are required case keys even when `trace` is `null` or readiness is
+`false`.
 
 ## Report
 
