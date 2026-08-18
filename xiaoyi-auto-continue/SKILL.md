@@ -291,7 +291,11 @@ the original task is still not actually complete.
 
 After the conversation loop ends, keep the current case's latest clean
 `<case_dir>/outputs/` snapshot. `run_test.py` replaces this directory on every
-pull; never merge round outputs or use an older run directory.
+pull; never merge round outputs or use an older run directory. The snapshot
+preserves visible files and directories under Desktop, Download, and Documents,
+but excludes any file or directory whose path contains a component beginning
+with `.`. Hidden runtime artifacts are not benchmark outputs and must not be
+transferred into the snapshot.
 
 Do not score or spawn Judge subagents here. Record this handoff entry in the
 host Agent's batch state:

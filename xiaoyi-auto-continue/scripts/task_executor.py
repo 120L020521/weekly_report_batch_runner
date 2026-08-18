@@ -10,7 +10,7 @@ import shutil
 import sys
 import time
 from datetime import datetime
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from uuid import uuid4
 
 from .hdc_client import (
@@ -187,11 +187,12 @@ def pull_outputs(
     target: str | None,
     verbose: bool = False,
 ) -> list[dict]:
-    """拉取三个远程目录，并用本轮干净快照整体替换旧 outputs。
+    """拉取三个远程目录的非隐藏内容，并替换旧 outputs 快照。
 
     HDC 在目标目录已经存在时接收同名远程目录，会把目录再次嵌套到
-    旧目录中。continue 轮因此不能直接复用 outputs；先拉到同级暂存
-    目录，再整体发布，确保 Judge 只看到当前远程最终状态。
+    旧目录中。这里先枚举远程文件树，排除路径中任意以 ``.`` 开头的
+    文件或目录，再逐文件拉到同级暂存目录并整体发布。这样 continue
+    轮不会合并旧 outputs，Judge 也不会看到运行时隐藏文件。
     """
     case_output_dir = Path(run_dir) / case_id
     case_output_dir.mkdir(parents=True, exist_ok=True)
@@ -216,10 +217,22 @@ def pull_outputs(
         local_subdir_path = staging_dir / local_subdir
         local_subdir_path.mkdir(parents=True, exist_ok=True)
 
-        # 包括隐藏项；空目录仍由上面的本地根目录表示。
-        list_cmd = f"ls -1A {shell_quote(remote_root)} 2>/dev/null"
+        # 分别枚举目录和文件，随后在主机侧过滤任意层级的隐藏路径。
+        # 逐文件 recv 避免可见目录中的隐藏子项被 HDC 递归带回。
+        quoted_root = shell_quote(remote_root)
         try:
-            out = remote_shell(list_cmd, target=target, timeout=SHELL_TIMEOUT, verbose=verbose)
+            directory_out = remote_shell(
+                f"find {quoted_root} -mindepth 1 -type d -print 2>/dev/null",
+                target=target,
+                timeout=SHELL_TIMEOUT,
+                verbose=verbose,
+            )
+            file_out = remote_shell(
+                f"find {quoted_root} -mindepth 1 -type f -print 2>/dev/null",
+                target=target,
+                timeout=SHELL_TIMEOUT,
+                verbose=verbose,
+            )
         except HdcError as e:
             snapshot_complete = False
             root_results.append({
@@ -232,7 +245,35 @@ def pull_outputs(
                 print(f"[{case_id}] Failed to list {remote_root}: {e}")
             continue
 
-        if not out.strip():
+        remote_prefix = remote_root.rstrip("/") + "/"
+
+        def visible_relative_paths(output: str) -> list[tuple[str, PurePosixPath]]:
+            visible: list[tuple[str, PurePosixPath]] = []
+            for raw_path in output.splitlines():
+                remote_path = raw_path.strip()
+                if not remote_path.startswith(remote_prefix):
+                    continue
+                relative = PurePosixPath(remote_path[len(remote_prefix):])
+                if (
+                    not relative.parts
+                    or any(part in {"", ".", ".."} or part.startswith(".") for part in relative.parts)
+                ):
+                    continue
+                visible.append((remote_path, relative))
+            return visible
+
+        remote_directories = visible_relative_paths(directory_out)
+        remote_files = visible_relative_paths(file_out)
+        top_level_names = {
+            relative.parts[0]
+            for _, relative in remote_directories + remote_files
+        }
+
+        for _, relative in remote_directories:
+            local_directory = local_subdir_path.joinpath(*relative.parts)
+            local_directory.mkdir(parents=True, exist_ok=True)
+
+        if not top_level_names:
             root_results.append({
                 "remote_root": remote_root,
                 "local_root": local_subdir,
@@ -241,15 +282,9 @@ def pull_outputs(
             })
             continue
 
-        top_level_entries = 0
-        for filename in out.strip().splitlines():
-            filename = filename.strip()
-            if not filename or filename in {".", ".."}:
-                continue
-            top_level_entries += 1
-
-            remote_path = f"{remote_root}/{filename}"
-            local_path = local_subdir_path / filename
+        for remote_path, relative in remote_files:
+            local_path = local_subdir_path.joinpath(*relative.parts)
+            local_path.parent.mkdir(parents=True, exist_ok=True)
 
             try:
                 if verbose:
@@ -267,7 +302,7 @@ def pull_outputs(
                         "local_path": str(local_path.relative_to(Path(run_dir) / case_id)),
                         "status": "pulled",
                     })
-                    print(f"[{case_id}] Pulled: {local_subdir}/{filename}")
+                    print(f"[{case_id}] Pulled: {local_subdir}/{relative.as_posix()}")
                 else:
                     snapshot_complete = False
                     pulled_files.append({
@@ -282,7 +317,10 @@ def pull_outputs(
                     "status": "failed",
                     "error": str(e),
                 })
-                print(f"[{case_id}] Failed to pull {filename}: {e}", file=sys.stderr)
+                print(
+                    f"[{case_id}] Failed to pull {relative.as_posix()}: {e}",
+                    file=sys.stderr,
+                )
 
         root_results.append({
             "remote_root": remote_root,
@@ -292,7 +330,7 @@ def pull_outputs(
                 for item in pulled_files
                 if item.get("remote_path", "").startswith(remote_root + "/")
             ) else "failed",
-            "top_level_entries": top_level_entries,
+            "top_level_entries": len(top_level_names),
         })
 
     # 保存拉取清单
