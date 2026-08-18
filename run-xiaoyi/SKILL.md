@@ -55,10 +55,15 @@ Make the Task the primary browsing unit; do not create stage-first roots:
     └── run_<YYYYMMDD>/    # one batch index per day
 ```
 
+<<<<<<< HEAD
 `<task_key>` is the full `FileOrganization_<n>_<n>` ID for file organization,
 `task<ID>` for numeric WorkspaceBench tasks, and the exact
 `metadata.absolute_id` for weekly-report tasks. Never add a `task` prefix to a
 weekly-report ID. Batch-only
+=======
+`<task_key>` is the full `FileOrganization_<n>_<n>` ID for file organization
+and `task<ID>` for numeric WorkspaceBench or weekly-report tasks. Batch-only
+>>>>>>> 874a79aed3a126240813fa65fc8adbbee74439cb
 indexes, queues, summaries, and merged HTML belong below `_xiaoyi_batches`; do
 not duplicate them into every Task directory. Existing explicit output paths
 remain valid for backward compatibility, but new runs use this layout.
@@ -77,7 +82,11 @@ dataset paths, configuration, and the Agent workspace.
   `_xiaoyi_batches/run_<YYYYMMDD>/`.
 - Weekly report: preserve the one-device serial person/task lifecycle, but route
   each Task's Runner output root to
+<<<<<<< HEAD
   `<agent_workspace>/<absolute_id>/xiaoyi_file_runs`; write the unified
+=======
+  `<agent_workspace>/task<ID>/xiaoyi_file_runs`; write the unified
+>>>>>>> 874a79aed3a126240813fa65fc8adbbee74439cb
   `weekly_runner_batch.json` under the batch index directory.
 - WorkspaceBench: preserve serial execution and exact dataset bindings. Route
   each Task's `--logs-dir` to
@@ -110,12 +119,21 @@ After every selected Runner item is terminal, write one UTF-8
       "evidence_ready": true,
       "metadata": "D:/workspace/task/何沐/21/metadata.json",
       "data": "D:/workspace/task/何沐/data",
+<<<<<<< HEAD
       "outputs": "D:/workspace/21/xiaoyi_file_runs/outputs",
       "runner_dir": "D:/workspace/21/xiaoyi_file_runs",
       "trace": "D:/workspace/21/xiaoyi_file_runs/21.jsonl",
       "task_root": "D:/workspace/21",
       "judge_dir": "D:/workspace/21/xiaoyi_judge",
       "halo_dir": "D:/workspace/21/xiaoyi_halo"
+=======
+      "outputs": "D:/workspace/task21/xiaoyi_file_runs/task21/outputs",
+      "runner_dir": "D:/workspace/task21/xiaoyi_file_runs/task21",
+      "trace": "D:/workspace/task21/xiaoyi_file_runs/task21/task21.jsonl",
+      "task_root": "D:/workspace/task21",
+      "judge_dir": "D:/workspace/task21/xiaoyi_judge",
+      "halo_dir": "D:/workspace/task21/xiaoyi_halo"
+>>>>>>> 874a79aed3a126240813fa65fc8adbbee74439cb
     }
   ]
 }
@@ -129,11 +147,14 @@ Write every path field explicitly and absolutely; use `null` only for optional
 for substitutes. For the task-centric layout, keep every `task_root` unique and
 below `artifact_root`, require `judge_dir = <task_root>/xiaoyi_judge`, and require
 `halo_dir = <task_root>/xiaoyi_halo`. `judge_root` contains batch-only files.
+<<<<<<< HEAD
 
 For weekly reports, keep `runner_dir` and `trace` in the batch/queue only for
 orchestration and HALO. The Judge Prepare step must not copy them into
 `xiaoyi_judge/`. Keep Runner-collected worklog and summary outside `outputs`, and never pass,
 copy, inspect, or score them in weekly Judge.
+=======
+>>>>>>> 874a79aed3a126240813fa65fc8adbbee74439cb
 
 For file organization, map `complete` to `runner_status = completed`; map
 `incomplete-after-3-continues` and `execution-error` to `runner_status = failed`,

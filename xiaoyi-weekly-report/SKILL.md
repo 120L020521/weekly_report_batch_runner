@@ -89,9 +89,15 @@ note 清空+推送 -> 执行小艺任务 -> 拉取 Trace/周报/worklog/summary
    force-stop XiaoYi between dialog rounds.
 5. Preserve the existing JSONL flow unchanged: snapshot the pre-Task log baseline,
    wait for a new `stop_reason=stop`, and pull the selected raw Trace to
+<<<<<<< HEAD
    `<agent_workspace>/<absolute_id>/xiaoyi_file_runs/<absolute_id>.jsonl`
    after each round.
    Trace content no longer selects report/worklog/summary paths.
+=======
+   `<agent_workspace>/task<numeric_id>/xiaoyi_file_runs/task<numeric_id>/task<numeric_id>.jsonl`
+   after each round.
+   Trace content no longer selects report/worklog paths.
+>>>>>>> 874a79aed3a126240813fa65fc8adbbee74439cb
 6. After the final dialog verdict, use only these HDC-visible paths:
 
    ```text
@@ -100,11 +106,17 @@ note 清空+推送 -> 执行小艺任务 -> 拉取 Trace/周报/worklog/summary
    /storage/media/100/local/files/Docs/.xiaoyi/workspace/<dialogPageId>/memory/weekly-report-skill/summary/
    ```
 
+<<<<<<< HEAD
    Pull direct files from the first path as generated reports beneath
    `<agent_workspace>/<absolute_id>/xiaoyi_file_runs/outputs/XiaoYiWorkspace/`.
    Recursively pull concrete files from the second and third paths beneath the separate
    `<agent_workspace>/<absolute_id>/xiaoyi_file_runs/worklog/` and
    `<agent_workspace>/<absolute_id>/xiaoyi_file_runs/summary/` directories.
+=======
+   Pull direct files from the first path as generated reports. Recursively pull
+   concrete files from the second path as worklog. Preserve both beneath
+   `<agent_workspace>/task<numeric_id>/xiaoyi_file_runs/task<numeric_id>/outputs/XiaoYiWorkspace/`.
+>>>>>>> 874a79aed3a126240813fa65fc8adbbee74439cb
    Do not inspect or
    pull Desktop, Documents, Download, calendar, memo, source-data mirrors,
    log-declared artifact paths, or any other workspace directory.
@@ -171,7 +183,11 @@ Use separate data paths only when the directories do not share one root:
   --deliverables-root "<deliverables_dir>" `
   --output-root "<batch_dir>" `
   --task-artifacts-root "<agent_workspace>" `
+<<<<<<< HEAD
   --person "<person>" --task "<absolute_id>"
+=======
+  --person "<person>" --task "<numeric_id>"
+>>>>>>> 874a79aed3a126240813fa65fc8adbbee74439cb
 ```
 
 Use `--config <json>` only to override runtime settings such as timeouts,
@@ -205,12 +221,21 @@ Store each Task's Runner evidence under its exact `metadata.absolute_id`; never
 add a `task` prefix and never use `metadata.id`:
 
 ```text
+<<<<<<< HEAD
 <agent_workspace>/<absolute_id>/xiaoyi_file_runs/
 ├── <absolute_id>.jsonl
 ├── <absolute_id>.meta.json
 ├── <absolute_id>.prompt.txt
 ├── <absolute_id>.continue1.txt ... <absolute_id>.continue3.txt (when used)
 ├── <absolute_id>.content.txt
+=======
+<agent_workspace>/task<numeric_id>/xiaoyi_file_runs/task<numeric_id>/
+├── task<numeric_id>.jsonl
+├── task<numeric_id>.meta.json
+├── task<numeric_id>.prompt.txt
+├── task<numeric_id>.continue1.txt ... task<numeric_id>.continue3.txt (when used)
+├── task<numeric_id>.content.txt
+>>>>>>> 874a79aed3a126240813fa65fc8adbbee74439cb
 ├── metadata.json
 ├── artifacts_manifest.json
 ├── completed.json | failed.json | interrupted.json
@@ -231,8 +256,13 @@ inputs after artifact collection has completed:
 ```text
 judgeInputs.metadata      = <metadata_root>/<person>/<ID>/metadata.json
 judgeInputs.data          = null
+<<<<<<< HEAD
 judgeInputs.outputs       = <agent_workspace>/<absolute_id>/xiaoyi_file_runs/outputs
 judgeInputs.runnerTaskDir = <agent_workspace>/<absolute_id>/xiaoyi_file_runs
+=======
+judgeInputs.outputs       = <agent_workspace>/task<ID>/xiaoyi_file_runs/task<ID>/outputs
+judgeInputs.runnerTaskDir = <agent_workspace>/task<ID>/xiaoyi_file_runs/task<ID>
+>>>>>>> 874a79aed3a126240813fa65fc8adbbee74439cb
 ```
 
 Keep `worklog/` and `summary/` outside `judgeInputs.outputs`. The weekly Judge must not copy,

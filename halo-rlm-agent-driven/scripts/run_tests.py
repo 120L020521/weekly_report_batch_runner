@@ -607,15 +607,23 @@ def test_halo_workflow() -> None:
         and Path(finished_value["render"]["html_report"]).is_file(),
         "batch finalization validates reports and renders HTML",
     )
+<<<<<<< HEAD
     task_absolute_id = "weekly-absolute-alpha"
     task_root = root / task_absolute_id
+=======
+    task_root = root / "task-workflow"
+>>>>>>> 874a79aed3a126240813fa65fc8adbbee74439cb
     task_halo = task_root / "xiaoyi_halo"
     task_centric_queue = root / "task-centric-judge-queue.json"
     write_json(task_centric_queue, {
         "version": 1,
         "producer": "judge-xiaoyi-results",
         "tasks": [{
+<<<<<<< HEAD
             "taskId": task_absolute_id,
+=======
+            "taskId": "task-workflow",
+>>>>>>> 874a79aed3a126240813fa65fc8adbbee74439cb
             "trace": str(source),
             "metadata": str(metadata),
             "preparedDir": str(root),
@@ -635,9 +643,14 @@ def test_halo_workflow() -> None:
     task_agent_input = Path(task_centric_value["tasks"][0]["agent_input"])
     check(
         task_centric_batch.returncode == 0
+<<<<<<< HEAD
         and task_agent_input.parent == task_halo / f"{task_absolute_id}_halo"
         and (task_agent_input.parent / f"{task_absolute_id}.halo.jsonl").is_file(),
         "batch preparation uses taskId for the artifact directory and prepared Trace",
+=======
+        and task_agent_input.is_relative_to(task_halo),
+        "batch preparation honors each validated task haloDir",
+>>>>>>> 874a79aed3a126240813fa65fc8adbbee74439cb
     )
 
 

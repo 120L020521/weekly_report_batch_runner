@@ -485,19 +485,30 @@ def load_weekly_config(config_path: Path) -> dict[str, Any]:
             raise ValueError(f"配置必须是 JSON 对象: {config_path}")
         config.update(loaded)
     config_dir = config_path.resolve().parent
+<<<<<<< HEAD
     for key in (
         "metadata_root", "deliverables_root", "scripts_root", "mock_runner_script",
         "output_root", "task_artifacts_root",
     ):
+=======
+    for key in ("metadata_root", "deliverables_root", "scripts_root", "output_root", "task_artifacts_root"):
+>>>>>>> 874a79aed3a126240813fa65fc8adbbee74439cb
         if key in config:
             config[key] = _resolve_path(config_dir, str(config[key]))
     return config
 
 
+<<<<<<< HEAD
 def _task_directory(config: dict[str, Any], task_id: str) -> Path:
     task_artifacts_root = config.get("task_artifacts_root")
     if task_artifacts_root is None:
         return Path(config["output_root"]) / _task_case_id(task_id)
+=======
+def _task_output_root(config: dict[str, Any], task_id: str) -> Path:
+    task_artifacts_root = config.get("task_artifacts_root")
+    if task_artifacts_root is None:
+        return config["output_root"]
+>>>>>>> 874a79aed3a126240813fa65fc8adbbee74439cb
     return Path(task_artifacts_root) / _task_case_id(task_id) / "xiaoyi_file_runs"
 
 
@@ -884,6 +895,10 @@ def _collect_task_artifacts(
 
 def run_weekly_task(task: WeeklyTask, config: dict[str, Any], *, target: str | None,
                     verbose: bool, dry_run: bool, rerun: bool) -> bool:
+<<<<<<< HEAD
+=======
+    output_root = _task_output_root(config, task.task_id)
+>>>>>>> 874a79aed3a126240813fa65fc8adbbee74439cb
     case_id = _task_case_id(task.task_id)
     task_dir = _task_directory(config, task.task_id)
     run_dir = task_dir.parent
@@ -1148,7 +1163,12 @@ def run_weekly_task(task: WeeklyTask, config: dict[str, Any], *, target: str | N
 
 def _task_handoff_entry(task: WeeklyTask, config: dict[str, Any]) -> dict[str, Any]:
     case_id = _task_case_id(task.task_id)
+<<<<<<< HEAD
     task_dir = _task_directory(config, task.task_id)
+=======
+    output_root = _task_output_root(config, task.task_id)
+    task_dir = output_root / case_id
+>>>>>>> 874a79aed3a126240813fa65fc8adbbee74439cb
     marker_names = (
         ("interrupted.json", "interrupted"),
         ("failed.json", "failed"),
@@ -1255,9 +1275,13 @@ def run_person(person: str, tasks: list[WeeklyTask], config: dict[str, Any], *,
     pending = tasks if rerun else [
         task for task in tasks
         if not is_case_completed(
+<<<<<<< HEAD
             _task_case_id(task.task_id),
             str(_task_directory(config, task.task_id).parent),
             case_dir=str(_task_directory(config, task.task_id)),
+=======
+            _task_case_id(task.task_id), str(_task_output_root(config, task.task_id))
+>>>>>>> 874a79aed3a126240813fa65fc8adbbee74439cb
         )
     ]
     if not pending:
@@ -1391,9 +1415,13 @@ def main(argv: list[str] | None = None) -> int:
         for person_index, (person, person_tasks) in enumerate(grouped):
             has_pending = args.rerun or any(
                 not is_case_completed(
+<<<<<<< HEAD
                     _task_case_id(task.task_id),
                     str(_task_directory(config, task.task_id).parent),
                     case_dir=str(_task_directory(config, task.task_id)),
+=======
+                    _task_case_id(task.task_id), str(_task_output_root(config, task.task_id))
+>>>>>>> 874a79aed3a126240813fa65fc8adbbee74439cb
                 )
                 for task in person_tasks
             )

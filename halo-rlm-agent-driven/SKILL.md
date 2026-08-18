@@ -27,10 +27,13 @@ engine.
   `OUTPUT_ROOT`. For a Judge batch, write batch indexes and merged HTML below the
   supplied `OUTPUT_ROOT`, and honor an explicitly validated `haloDir =
   <taskRoot>/xiaoyi_halo` in each queue row for per-Task artifacts.
+<<<<<<< HEAD
 - In batch mode, use the Judge queue's exact, path-safe `taskId` for both the
   `<taskId>_halo` artifact directory and `<taskId>.halo.jsonl`; do not derive
   either name from the source Trace filename. For weekly reports this `taskId`
   is `metadata.absolute_id` and may be non-numeric.
+=======
+>>>>>>> 874a79aed3a126240813fa65fc8adbbee74439cb
 - Pass the exact Trace declared by the caller or Judge queue. Never replace it
   with an ancestor directory and never scan for alternate inputs.
 - Task and Judge data are evaluator context, not Trace evidence and never

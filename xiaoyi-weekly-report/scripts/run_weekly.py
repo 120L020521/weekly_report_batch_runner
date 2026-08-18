@@ -15,11 +15,16 @@ RUNTIME_ROOT = Path(__file__).resolve().parent / "runtime"
 BUNDLED_CONFIG = SKILL_ROOT / "assets" / "weekly_config.json"
 DATA_PATH_KEYS = {
     "metadata_root", "deliverables_root", "output_root", "scripts_root",
+<<<<<<< HEAD
     "task_artifacts_root", "mock_runner_script",
 }
 DEFAULT_MOCK_RUNNER = (
     SKILL_ROOT.parents[1] / "note" / "data_yangshi" / "jiaoben" / "run_data_mock.py"
 )
+=======
+    "task_artifacts_root",
+}
+>>>>>>> 874a79aed3a126240813fa65fc8adbbee74439cb
 
 
 def _is_data_root(path: Path) -> bool:
@@ -88,11 +93,15 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--output-root", help="外部运行结果目录，默认 <project-root>/xiaoyi_logs")
     parser.add_argument(
         "--task-artifacts-root",
+<<<<<<< HEAD
         help="任务优先布局根目录；每个 Task 写入 <root>/<metadata.absolute_id>/xiaoyi_file_runs/。",
     )
     parser.add_argument(
         "--mock-runner-script",
         help="note 数据清空+推送入口，默认使用当前仓库 note/data_yangshi/jiaoben/run_data_mock.py",
+=======
+        help="任务优先布局根目录；每个 Task 写入 <root>/task<ID>/xiaoyi_file_runs/。",
+>>>>>>> 874a79aed3a126240813fa65fc8adbbee74439cb
     )
     parser.add_argument("--config", help="可选覆盖配置；其中 scripts_root 始终使用 Skill 内置脚本")
     known, forwarded = parser.parse_known_args(argv)
@@ -115,12 +124,15 @@ def main(argv: list[str] | None = None) -> int:
         custom_config_path,
         "task_artifacts_root",
     )
+<<<<<<< HEAD
     mock_runner_script = _external_path(
         known.mock_runner_script,
         custom_config,
         custom_config_path,
         "mock_runner_script",
     )
+=======
+>>>>>>> 874a79aed3a126240813fa65fc8adbbee74439cb
 
     data_root: Path | None = None
     if known.project_root or metadata_root is None or deliverables_root is None:

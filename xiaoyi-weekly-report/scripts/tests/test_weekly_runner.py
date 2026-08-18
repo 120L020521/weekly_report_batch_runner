@@ -504,10 +504,17 @@ class WeeklyRunnerArtifactTests(unittest.TestCase):
             task = self.make_task(root)
             batch_root = root / "_xiaoyi_batches" / "run_20260818"
             task_artifacts_root = root
+<<<<<<< HEAD
             runner_root = root / "21" / "xiaoyi_file_runs"
             task_dir = runner_root
             (task_dir / "outputs").mkdir(parents=True)
             (task_dir / "21.jsonl").write_text("{}\n", encoding="utf-8")
+=======
+            runner_root = root / "task21" / "xiaoyi_file_runs"
+            task_dir = runner_root / "task21"
+            (task_dir / "outputs").mkdir(parents=True)
+            (task_dir / "task21.jsonl").write_text("{}\n", encoding="utf-8")
+>>>>>>> 874a79aed3a126240813fa65fc8adbbee74439cb
             (task_dir / "completed.json").write_text("{}", encoding="utf-8")
             config = {
                 "metadata_root": root / "task",
@@ -526,7 +533,10 @@ class WeeklyRunnerArtifactTests(unittest.TestCase):
             self.assertEqual(entry["judgeInputs"]["outputs"], str((task_dir / "outputs").resolve()))
             self.assertEqual(payload["roots"]["taskArtifacts"], str(root.resolve()))
             self.assertTrue(payload["runnerFinished"])
+<<<<<<< HEAD
             self.assertFalse((runner_root / "21").exists())
+=======
+>>>>>>> 874a79aed3a126240813fa65fc8adbbee74439cb
 
 
 if __name__ == "__main__":
