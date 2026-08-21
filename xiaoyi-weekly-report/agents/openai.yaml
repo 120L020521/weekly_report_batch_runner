@@ -1,7 +1,0 @@
-interface:
-  display_name: "XiaoYi Weekly Report Runner"
-  short_description: "按 absolute_id 命名，调用 note 后串行执行并拉取周报、worklog、summary 和 Trace"
-  default_prompt: "Use $xiaoyi-weekly-report to name each selected Task only from metadata.absolute_id (which may be non-numeric), prepare it with note/data_yangshi/jiaoben/run_data_mock.py, execute it serially, pull its report/worklog/summary/Trace, and return the Runner handoff."
-
-policy:
-  allow_implicit_invocation: false

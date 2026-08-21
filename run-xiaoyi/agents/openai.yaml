@@ -1,6 +1,0 @@
-interface:
-  display_name: "Run XiaoYi"
-  short_description: "Route Runner, unified Judge, HALO, and HTML"
-  default_prompt: "Use $run-xiaoyi to route this XiaoYi request through the requested Runner, Judge, and diagnosis stages."
-policy:
-  allow_implicit_invocation: true

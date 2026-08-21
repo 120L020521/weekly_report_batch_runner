@@ -1,4 +1,0 @@
-interface:
-  display_name: "XiaoYi Results Judge"
-  short_description: "Prepare and judge three XiaoYi task adapters"
-  default_prompt: "Use $judge-xiaoyi-results to prepare this unified XiaoYi Judge batch, evaluate each task, and validate the results."
